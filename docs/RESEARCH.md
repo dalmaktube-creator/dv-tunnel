@@ -322,3 +322,35 @@ escalation yet. Keep all host and quality gates; retain lean CPU/TUN observation
 Original uploaded report.json SHA256:
 - iran: 7a808ce02bd0a021e9d75c95fc8cca73ef107bb91b7683bf840a39a288bfbfce
 - turkey: 1db3951272eb894d2948e0a977c5056f227565d56631dbc7dc44b26a5700f094
+
+
+## Lean 120-second mixed-load trial — passed
+
+Client passed; server completed the planned 120-second phase at 500 UDP
+probes/second (4.8 Mbps payload per initiating sender). Each initiating side
+sent 60000 probes and received 60000 unique valid replies: 120,000/120,000
+combined, no missing-by-deadline, invalid replies, duplicates or per-flow
+reorder. Counts are probes/replies, not total wire packets; echo return adds
+traffic. Ninety-four TCP upload/download transactions completed without errors.
+UDP echo RTT p99: Iran initiated 220.041 ms, Turkey initiated 222.317 ms.
+
+No new carrier drops, sampled TUN drop/error increases, sessions/PID changes,
+or observation errors. Cleanup OK both nodes. Eight new admission waits per
+endpoint, all eight successful, zero timeout. Whole-host CPU max samples were
+approximately 85.86% Turkey and 69.95% Iran, with no host guard stop. Do not
+claim CPU always below 85%: the guard needs TWO consecutive high samples.
+The Turkish host still has limited CPU headroom and normal production load.
+
+This validates the longer bounded mixed load, not indefinite stability,
+application acceptance or maximum capacity. Lean mode has preflight socket
+verification only; no periodic TCP backlog/retransmission evidence. No causal
+A/B performance claim is made against previous runs or different host loads.
+
+Next: [bounded rate ladder](RATE-LADDER.md), two short steps with unchanged
+runtime and safety thresholds. Step two executes only if step one passes all
+quality gates. No queue changes, carrier restart, disabled guards or high-rate
+production stress test.
+
+Original uploaded report.json SHA256:
+- iran: 2496693dfc248214d6f56748132653d9919136bbe4a7fac549b646a7417d664b
+- turkey: 995405336ba77eb57ab10739b59bd01d687c1a97e238bb2b4b660665f2fc7c6b

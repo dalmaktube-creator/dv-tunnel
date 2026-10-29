@@ -391,6 +391,10 @@ def diagnostic_phases(seconds):
     return [dict(id=1,seconds=seconds,pps=500)]
 
 
+def ladder_phases():
+    return [dict(id=1,seconds=30,pps=700),dict(id=2,seconds=30,pps=1000)]
+
+
 def run(args,live=None,helper=None,phases=None,ports=None):
     os.umask(0o077);diagnostic=getattr(args,'queue_diagnostic',False);lean=getattr(args,'lean_observer',False);report=dict(suite=('dv-queue-diagnostic-lean-v1' if lean else 'dv-queue-diagnostic-v1') if diagnostic else 'dv-soak-v2',role=args.role,status='failed',started_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
         notes=['Only existing test link; no carrier/service/config/firewall/routes changed.',
@@ -406,9 +410,13 @@ def run(args,live=None,helper=None,phases=None,ports=None):
                'Whole-host CPU85% twice/memory192MiB guards reduce risk, not zero production-impact guarantee.'])
     guard=services=monitor=observer=None;live=live or load_live();h=helper or live.load_helper();duration=getattr(args,'diagnostic_seconds',30);specs=phases or (diagnostic_phases(duration) if diagnostic else PHASES)
     if diagnostic and duration==120:report['suite']+='-120s'
+    ladder=getattr(args,'rate_ladder',False)
+    if ladder:
+        specs=phases or ladder_phases();report['suite']='dv-rate-ladder-lean-v1'
     report['planned_phases']=specs
     args.expect_profile='split-udp-v1'
     try:
+        if ladder and (not diagnostic or not lean or duration!=30):raise ValueError('Rate ladder requires queue diagnostic, lean observer and default diagnostic duration')
         if not diagnostic and duration!=30:raise ValueError('Diagnostic duration requires queue diagnostic')
         report['before']=live.inspect_link(args)
         expected=getattr(args,'expect_version',None)
@@ -459,6 +467,7 @@ def run(args,live=None,helper=None,phases=None,ports=None):
                 time.sleep(2.2);after=live.inspect_link(args)
                 result['carrier_delta']=live.deltas(before['stats'],after['stats'])
                 passed=phase_gate(result,result['carrier_delta'],guard.stop.is_set())
+                if live.deltas(report['before']['stats'],after['stats']).get('drops'):passed=False
                 result['gate_passed']=passed
                 print('PHASE_RESULT',spec['id'],'PASS' if passed else 'STOP',
                       'UDP missing:',(result.get('udp_local_initiated') or {}).get('missing_by_deadline'),(result.get('udp_peer_initiated') or {}).get('missing_by_deadline'),flush=True)
@@ -505,6 +514,7 @@ def run(args,live=None,helper=None,phases=None,ports=None):
 def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('role',choices=['server','client'])
     ap.add_argument('--queue-diagnostic',action='store_true',help='One bounded 4.8Mbps phase with read-only carrier-owned TCP and TUN counters; no tuning or carrier changes');ap.add_argument('--expect-version');ap.add_argument('--expect-lane-packets',type=int);ap.add_argument('--expect-udp-wait-ms',type=int);ap.add_argument('--instance',default='main');ap.add_argument('--iface',default='wft0')
+    ap.add_argument('--rate-ladder',action='store_true',help='Lean queue diagnostic only: bounded 30s phases at 6.72 then 9.6Mbps per UDP initiator; escalate only after quality gate')
     ap.add_argument('--diagnostic-seconds',type=int,choices=(30,120),default=30,help='Queue diagnostic duration only; fixed UDP rate and unchanged safety gates')
     ap.add_argument('--lean-observer',action='store_true',help='Queue diagnostic only: verify sockets once, keep CPU/TUN and safety polling; no periodic ss process scans')
     ap.add_argument('--cpu-baseline-seconds',type=int,default=0,help='0..30 seconds without test load before services; queue diagnostic only; safety guards unchanged')
