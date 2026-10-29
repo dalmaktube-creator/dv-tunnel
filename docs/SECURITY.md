@@ -12,8 +12,9 @@
   than disabling verification to hide a certificate error.
 - Go TLS/WSS may be fingerprinted. HTML fallback, SNI or padding is not browser
   impersonation, DPI proof or a guarantee against blocking.
-- No installer, upgrade daemon, public metrics, remote administration or automatic
-  production integration is included in this initial standalone extraction.
+- The explicit Ubuntu installer/menu manages only DV-owned paths and services.
+  No background upgrade daemon, public metrics, remote administration or automatic
+  production integration is included. Read UPDATE.md for root/update trust limits.
 - Never publish generated configurations, private keys or tokens. Acceptance
   archives contain only whitelisted test measurements, not carrier logs/configs.
 - Test traffic shares production resources unless the operator isolates servers.

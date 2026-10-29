@@ -1,0 +1,50 @@
+name: build-preview-release
+on:
+  push:
+    branches: [main]
+    paths: [VERSION]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: dv-release
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+      - name: Validate and test before publication
+        run: |
+          python3 -c 'import re; v=open("VERSION").read().strip(); assert re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-(alpha|preview|beta|rc)\.(0|[1-9][0-9]*)",v)'
+          test -z "$(gofmt -l cmd)"
+          go vet ./...
+          go test -race ./...
+          mkdir -p build release-assets
+          V=$(cat VERSION)
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-X main.version=$V" -o build/dv-tunnel-amd64 ./cmd/dv-tunnel
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-X main.version=$V" -o build/dv-tunnel-arm64 ./cmd/dv-tunnel
+          DV_CHECK_BINARY="$PWD/build/dv-tunnel-amd64" python3 -m unittest discover -s tests -v
+      - name: Package whitelisted files and SHA256 checksums
+        run: |
+          V=$(cat VERSION)
+          python3 tools/package_release.py --binary build/dv-tunnel-amd64 --version "$V" --arch amd64 --output release-assets > release-assets/SHA256SUMS
+          python3 tools/package_release.py --binary build/dv-tunnel-arm64 --version "$V" --arch arm64 --output release-assets >> release-assets/SHA256SUMS
+      - name: Publish experimental release, without replacing an existing tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(cat VERSION)
+          if gh release view "$V" >/dev/null 2>&1; then
+            echo 'Release already exists; refusing to replace assets or move its tag.' >&2
+            exit 1
+          fi
+          gh release create "$V" release-assets/* --target "$GITHUB_SHA" --prerelease \
+            --title "DV Tunnel $V" \
+            --notes 'Experimental preview. Versioned Ubuntu menu/update/rollback; no automatic configuration migration, service activation, client routing or capacity guarantee. Check SHA256SUMS and source before root installation.'

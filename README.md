@@ -10,6 +10,14 @@ This is a research build, not a stable release, an 800 Mbps capacity claim,
 a censorship-resistance guarantee, or a substitute for application acceptance.
 Outer TCP head-of-line blocking remains, including for inner UDP/QUIC.
 
+## Ubuntu terminal menu and updates
+
+Versioned installation, status, explicit update/restart and local rollback are
+available via `sudo dv-tunnel`. See [installation and update guide](docs/UPDATE.md).
+Installing the menu does not import, start, enable or migrate a tunnel. Published
+preview assets must finish building first; root installation trusts this repository
+and GitHub HTTPS/checksums, not an independent code signature.
+
 ## Build and verify
 
 Use a security-supported Go toolchain (verified here with Go 1.27.3), Python 3,
@@ -75,5 +83,5 @@ buffer is not a guarantee of better latency.
 - [Research checkpoint](docs/RESEARCH.md): evidence, limitations and provenance.
 - [Security boundaries](docs/SECURITY.md).
 
-The original panel repository is not changed by this extraction. No public
-release or open-source license is implied by this private repository.
+The original panel repository is not changed by this extraction. Published preview releases remain experimental. Public visibility does not grant
+an open-source license; see LICENSE.

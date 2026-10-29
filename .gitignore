@@ -7,3 +7,5 @@ config.json
 stats.json
 *.pem
 *.key
+/build/
+/release-assets/
