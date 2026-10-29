@@ -153,6 +153,16 @@ class FieldPairTests(unittest.TestCase):
                 self.assertEqual(result.returncode==0,expected==0,(n,split,result.stderr))
                 self.assertEqual(p.read_bytes(),before)
 
+    @unittest.skipUnless(os.environ.get('DV_CHECK_BINARY'),'compiled core required')
+    def test_udp_wait_cli_is_bounded_split_only_and_private_preserving(self):
+        binary=os.environ['DV_CHECK_BINARY']
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'pair';F.generate(root,'198.51.100.10','10.254.253.0/30',variant='offload-lowlat')
+            p=root/'node-a/config.json';before=p.read_bytes()
+            for n,split,ok in [(200,True,True),(1,True,True),(0,False,True),(-1,True,False),(201,True,False),(200,False,False)]:
+                result=subprocess.run([binary,'--config',str(p),'--check','--udp-wait-ms',str(n)]+(['--split-udp'] if split else []),capture_output=True,timeout=10)
+                self.assertEqual(result.returncode==0,ok,(n,split,result.stderr));self.assertEqual(p.read_bytes(),before)
+
 
 if __name__ == "__main__":
     unittest.main()

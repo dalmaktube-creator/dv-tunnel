@@ -98,9 +98,10 @@ class QueueDiagnostics:
         if not isinstance(pid,int) or pid<=0 or not re.fullmatch(r'[a-zA-Z0-9_-]{1,15}',iface):raise ValueError('Diagnostic identity invalid')
         self.service_pid=pid;self.pid=resolve_carrier_pid(pid);self.identity=process_identity(self.pid);self.iface=iface;self.ss=shutil.which('ss')
         if not self.ss:raise RuntimeError('ss is required for queue diagnostics')
-        self.samples=[];self.done=threading.Event();self.errors=0;self.thread=None
+        self.samples=[];self.done=threading.Event();self.errors=0;self.thread=None;self.load_stop=None;self.safety_stop_reason=None;self.kernel_initial=None
         first=self.sample()
         if 'error_type' in first or len(first.get('tcp_sockets',[]))!=2:raise RuntimeError('Expected two established carrier-owned TCP sockets on port 42443')
+        self.kernel_initial=first.get('tun_kernel')
         self.samples.append(first)
         self.thread=threading.Thread(target=self.loop,daemon=True);self.thread.start()
     def sample(self):
@@ -119,11 +120,17 @@ class QueueDiagnostics:
     def loop(self):
         while len(self.samples)<900 and not self.done.wait(.5):
             sample=self.sample();self.errors+=int('error_type' in sample);self.samples.append(sample)
+            if 'error_type' in sample and getattr(self,'load_stop',None) is not None:
+                self.safety_stop_reason='Queue observation failed during load';self.load_stop.set()
+            initial=getattr(self,'kernel_initial',None);kernel=sample.get('tun_kernel')
+            if initial is not None and kernel is not None and any(kernel.get(k,0)>initial.get(k,0) for k in ('rx_dropped','tx_dropped','rx_errors','tx_errors')):
+                self.safety_stop_reason='TUN kernel drop/error counter increased'
+                if self.load_stop is not None:self.load_stop.set()
     def close(self):
         self.done.set()
         if self.thread:self.thread.join(2)
         return dict(kind='carrier-owned-tcp-and-tun-v1',sample_interval_s=.5,max_samples=900,
-                    service_pid=self.service_pid,socket_pid=self.pid,samples=self.samples,observation_errors=self.errors,
+                    service_pid=self.service_pid,socket_pid=self.pid,samples=self.samples,observation_errors=self.errors,safety_stop_reason=self.safety_stop_reason,
                     sample_cap_reached=len(self.samples)>=900,
                     notes=['Service MainPID is the Python runner; socket PID is its unique dv-tunnel child verified by PPid, cgroup and kernel start ticks. Numeric ss fields only, established sockets on TCP port 42443.',
                            'FD identifies a local socket only; not a proven UDP/TCP lane mapping. FD can be reused after reconnect.',
@@ -271,7 +278,7 @@ def make_handler(h):
                 initial=getattr(o,'initial',None);suite=getattr(o,'suite',None)
                 if initial is None or suite is None:
                     h.send_json(self.request,dict(ok=False,suite='initializing'));return
-                h.send_json(self.request,dict(ok=True,suite=suite,version=initial['stats'].get('version'),packet_limits={k:v.get('packet_limit') for k,v in initial['stats'].get('lanes',{}).items()}));return
+                h.send_json(self.request,dict(ok=True,suite=suite,version=initial['stats'].get('version'),packet_limits={k:v.get('packet_limit') for k,v in initial['stats'].get('lanes',{}).items()},udp_wait_ms=initial['stats'].get('lanes',{}).get('udp',{}).get('queue_wait_ms')));return
             if op=='transfer':
                 data=h.read_exact(self.request,h.SIZE)
                 if data!=h.PAYLOAD:raise ValueError('Upload integrity failure')
@@ -369,8 +376,11 @@ def run(args,live=None,helper=None,phases=None,ports=None):
         if expected and report['before']['stats'].get('version')!=expected:raise RuntimeError('Installed carrier version does not match experiment')
         expected_packets=getattr(args,'expect_lane_packets',None)
         if expected_packets is not None and (not 1<=expected_packets<=128 or any(report['before']['stats'].get('lanes',{}).get(k,{}).get('packet_limit')!=expected_packets for k in ('tcp','udp'))):raise RuntimeError('Local lane packet cap does not match experiment')
+        expected_wait=getattr(args,'expect_udp_wait_ms',None)
+        if expected_wait is not None and (not 0<=expected_wait<=200 or report['before']['stats'].get('lanes',{}).get('udp',{}).get('queue_wait_ms')!=expected_wait):raise RuntimeError('Local UDP wait does not match experiment')
         if diagnostic:observer=QueueDiagnostics(report['before']['main_pid'],args.iface)
         guard=h.HostGuard();monitor=Monitor(live,args,guard.stop)
+        if observer:observer.load_stop=guard.stop
         h.Handler=make_handler(h)
         tl,ul,tp,up=ports or (h.TCP_PORT,h.UDP_PORT,h.TCP_PORT,h.UDP_PORT)
         services=h.Services(args.local,args.peer,tcp_port=tl,udp_port=ul,peer_udp_port=up,allow_reconnect=False)
@@ -391,6 +401,7 @@ def run(args,live=None,helper=None,phases=None,ports=None):
             if greeting.get('suite')!=report['suite']:raise RuntimeError('Both endpoints must run the same checker mode')
             if expected and greeting.get('version')!=expected:raise RuntimeError('Peer carrier version does not match experiment')
             if expected_packets is not None and any(greeting.get('packet_limits',{}).get(k)!=expected_packets for k in ('tcp','udp')):raise RuntimeError('Peer lane packet cap does not match experiment')
+            if expected_wait is not None and greeting.get('udp_wait_ms')!=expected_wait:raise RuntimeError('Peer UDP wait does not match experiment')
             for spec in specs:
                 print('PHASE',spec['id'],'seconds',spec['seconds'],'UDP Mbps per initiator',spec['pps']*.0096,flush=True)
                 before=live.inspect_link(args)
@@ -434,7 +445,10 @@ def run(args,live=None,helper=None,phases=None,ports=None):
                 report['udp_probe_summaries']=dict(services.partial_probes)
         if guard:
             guard.close();report['host']=dict(cpu_max_sample_pct=guard.cpu_max,mem_available_min_sample_mib=guard.mem_min,stop_reason=guard.reason)
-        if observer:report['queue_diagnostics']=observer.close()
+        if observer:
+            report['queue_diagnostics']=observer.close()
+            if report['queue_diagnostics'].get('safety_stop_reason'):
+                report['status']='failed';report.setdefault('error',report['queue_diagnostics']['safety_stop_reason'])
         report['finished_utc']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
         live.write_report(args.output,args.role,report)
     return 0 if report['status'] in ('passed','completed') else 1
@@ -442,7 +456,7 @@ def run(args,live=None,helper=None,phases=None,ports=None):
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('role',choices=['server','client'])
-    ap.add_argument('--queue-diagnostic',action='store_true',help='One 30s 4.8Mbps phase with read-only carrier-owned TCP and TUN counters; no tuning or carrier changes');ap.add_argument('--expect-version');ap.add_argument('--expect-lane-packets',type=int);ap.add_argument('--instance',default='main');ap.add_argument('--iface',default='wft0')
+    ap.add_argument('--queue-diagnostic',action='store_true',help='One 30s 4.8Mbps phase with read-only carrier-owned TCP and TUN counters; no tuning or carrier changes');ap.add_argument('--expect-version');ap.add_argument('--expect-lane-packets',type=int);ap.add_argument('--expect-udp-wait-ms',type=int);ap.add_argument('--instance',default='main');ap.add_argument('--iface',default='wft0')
     ap.add_argument('--local');ap.add_argument('--peer');ap.add_argument('--output')
     args=ap.parse_args();args.output=args.output or ('/root/dv-queue-diag-results' if args.queue_diagnostic else '/root/dv-soak-results');args.local=args.local or ('10.254.253.2' if args.role=='server' else '10.254.253.1');args.peer=args.peer or ('10.254.253.1' if args.role=='server' else '10.254.253.2')
     signal.signal(signal.SIGTERM,lambda s,f:(_ for _ in ()).throw(KeyboardInterrupt()))

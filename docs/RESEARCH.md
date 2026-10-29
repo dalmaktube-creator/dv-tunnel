@@ -180,3 +180,38 @@ Original report.json SHA256:
 Next: QUEUE-BURST-TRIAL.md. An explicit preview.5 packet-cap trial keeps private
 configuration bytes and byte/age/write limits unchanged. No operator result or
 performance fix is claimed before field acceptance.
+
+
+## Preview.5 packet-slot trial — failed byte-cap gate
+
+The explicit 256-total-slot override (128 per split lane) was verified at both
+endpoints, with the unchanged 131072-byte lane budgets. Turkey recorded 15 new
+queue_bytes drops, all datagram; Iran recorded zero new carrier drops. This
+triggered the existing any-byte-drop hard stop, not the >=64 packet-drop stop.
+The planned 30-second / 4.8 Mbps-per-initiator mixed phase aborted; no full-rate
+or higher-capacity acceptance was obtained. More packet slots were not enough.
+
+Partial unreturned-at-stop counts were 319 Iran-initiated and 45 Turkey-initiated;
+both missing_by_deadline values are null. These are not final UDP loss rates.
+No TCP transaction completed before abort; subsequent ConnectionResetError and
+peer-service ConnectionRefusedError do not establish TCP payload corruption or
+carrier failure. New datagram writer duration maxima were 149858 us Iran and
+120328 us Turkey, including scheduling and socket wait, not proof of a sole WAN
+cause. PIDs/session snapshots remained unchanged, both connected, cleanup OK.
+
+TUN sampled drop/error counters did not increase; observation errors were zero.
+Outer TCP observed cumulative retransmission deltas: Iran fd6 +0 / fd7 +0;
+Turkey fd7 +1 / fd8 +7. Max sampled socket Send-Q bytes respectively:
+Iran 15600 / 160202; Turkey 3576 / 182448. FD is not a verified protocol lane
+label, polling can miss brief events, and no causal or per-probe attribution is
+made from these socket counters. Host guards did not trigger.
+
+Original uploaded report.json SHA256:
+- iran: 491eedf5f7cc49bd3fb0e85b9b5003d62de3b012099b97000ed4e38f757f5b1f
+- turkey: c9aab79b200d601dad7ebd615ffbd1de5b9d460295ac75ccdc704607d451152a
+
+Next: [bounded UDP admission trial](UDP-WAIT-TRIAL.md), opt-in preview.6. Restore
+original packet caps; permit one bounded admission deadline rather than enlarge
+buffers again. The shared TUN reader can propagate backpressure and latency, so
+application delivery/latency gates and added kernel-counter checks are required.
+No preview.6 field result or performance improvement is claimed yet.

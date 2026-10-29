@@ -84,7 +84,8 @@ type config struct {
 	// Byte cap of the outgoing queue; 0 leaves only the packet cap active.
 	QueueBytes int `json:"queue_bytes,omitempty"`
 	// Opt-in CLI feature; never written into legacy private configurations.
-	SplitUDP bool `json:"-"`
+	SplitUDP  bool `json:"-"`
+	UDPWaitMS int  `json:"-"`
 }
 
 func (c config) packetQueueSize() int {
@@ -136,6 +137,9 @@ func (c config) sources() ([]netip.Prefix, error) {
 }
 
 func (c config) validate() error {
+	if c.UDPWaitMS < 0 || c.UDPWaitMS > 200 || (c.UDPWaitMS > 0 && !c.SplitUDP) {
+		return errors.New("udp-wait-ms requires split-udp and 0..200 milliseconds")
+	}
 	if c.SplitUDP && (c.TUN == "" || c.packetQueueSize() < 2 || c.QueueBytes == 1) {
 		return errors.New("split-udp requires TUN mode, at least 2 queue packets, and byte budget 0 or >=2")
 	}
@@ -428,6 +432,7 @@ type session struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	q         chan packet
+	space     chan struct{}
 	mu        sync.Mutex
 	flows     map[uint64]*flow
 	addrs     map[string]uint64
@@ -441,7 +446,16 @@ type session struct {
 }
 
 // took releases a dequeued packet's share of the byte budget.
-func (s *session) took(p packet) packet { s.qbytes.Add(-int64(len(p.data))); return p }
+func (s *session) took(p packet) packet {
+	s.qbytes.Add(-int64(len(p.data)))
+	if s.dgram && s.e.cfg.UDPWaitMS > 0 {
+		select {
+		case s.space <- struct{}{}:
+		default:
+		}
+	}
+	return p
+}
 
 func (e *engine) reserve(ws *websocket.Conn, ctx context.Context) *session {
 	return e.reserveLane(ws, ctx, false, nil)
@@ -484,7 +498,7 @@ func (e *engine) reserveLane(ws *websocket.Conn, ctx context.Context, dgram bool
 			budget += e.cfg.QueueBytes % 2
 		}
 	}
-	s := &session{e: e, ws: ws, ctx: ctx, cancel: cancel, q: make(chan packet, packets), flows: map[uint64]*flow{}, addrs: map[string]uint64{}, finished: make(chan struct{}), dgram: dgram, byteLimit: budget}
+	s := &session{e: e, ws: ws, ctx: ctx, cancel: cancel, q: make(chan packet, packets), space: make(chan struct{}, 1), flows: map[uint64]*flow{}, addrs: map[string]uint64{}, finished: make(chan struct{}), dgram: dgram, byteLimit: budget}
 	*slot = s
 	e.readiness()
 	e.m.Sessions.Add(1)
@@ -494,11 +508,11 @@ func (e *engine) reserveLane(ws *websocket.Conn, ctx context.Context, dgram bool
 // Select under e.mu, then copy into a bounded independent writer queue.
 func (e *engine) enqueueIP(p []byte, flags uint8, gso uint16) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	s := e.current
 	if e.cfg.SplitUDP && datagramIP(p) {
 		s = e.datagram
 	}
+	e.mu.Unlock() // Admission may wait: never hold the engine lifecycle/snapshot lock.
 	if s == nil || s.q == nil {
 		e.m.drop(dropNoSessionOrOversize)
 		return
@@ -513,6 +527,9 @@ func (s *session) byteBudget() int {
 }
 func (s *session) enqueue(id uint64, p []byte) { s.enqueueMeta(id, p, 0, 0) }
 func (s *session) enqueueMeta(id uint64, p []byte, flags uint8, gso uint16) {
+	entered := time.Now()
+	wait := admissionWait{s: s}
+	defer wait.finish()
 	limit := maxPayload
 	if s.e.cfg.Offload {
 		limit = maxSuper
@@ -531,22 +548,30 @@ func (s *session) enqueueMeta(id uint64, p []byte, flags uint8, gso uint16) {
 		old := s.qbytes.Load()
 		next := old + int64(len(p))
 		if c := int64(s.byteBudget()); c > 0 && next > c {
-			s.drop(dropQueueBytes)
+			if wait.next() {
+				continue
+			}
+			if s.ctx.Err() != nil {
+				s.drop(dropCancelledSession)
+			} else {
+				s.drop(dropQueueBytes)
+			}
 			return
 		}
 		if s.qbytes.CompareAndSwap(old, next) {
 			break
 		}
 	}
-	v := packet{id: id, data: append([]byte(nil), p...), at: time.Now(), flags: flags, gso: gso}
+	v := packet{id: id, data: append([]byte(nil), p...), at: entered, flags: flags, gso: gso}
 	select {
 	case s.q <- v:
+		wait.admitted = true
 		return
 	default:
 	}
 	// A TUN reader can fill a short datagram queue before its runnable writer
-	// gets scheduled. Yield ONCE, only in the opt-in datagram lane. Never wait
-	// for socket progress or grow buffers: a blocked writer still causes drops.
+	// gets scheduled. Yield ONCE, only in the opt-in datagram lane. The default
+	// remains nonblocking; an explicit bounded admission wait may follow below.
 	if s.e.cfg.SplitUDP && s.dgram {
 		s.laneMetrics().queueYields.Add(1)
 		runtime.Gosched()
@@ -557,12 +582,29 @@ func (s *session) enqueueMeta(id uint64, p []byte, flags uint8, gso uint16) {
 			return
 		case s.q <- v:
 			s.laneMetrics().retrySuccess.Add(1)
+			wait.admitted = true
+			return
+		default:
+		}
+	}
+	for wait.next() {
+		select {
+		case <-s.ctx.Done():
+			s.qbytes.Add(-int64(len(p)))
+			s.drop(dropCancelledSession)
+			return
+		case s.q <- v:
+			wait.admitted = true
 			return
 		default:
 		}
 	}
 	s.qbytes.Add(-int64(len(p)))
-	s.drop(dropQueuePackets)
+	if s.ctx.Err() != nil {
+		s.drop(dropCancelledSession)
+	} else {
+		s.drop(dropQueuePackets)
+	}
 }
 func (s *session) ingress(a *net.UDPAddr, p []byte) {
 	s.mu.Lock()
@@ -1157,6 +1199,7 @@ func main() {
 	show := flag.Bool("version", false, "show version")
 	check := flag.Bool("check", false, "validate without opening sockets")
 	split := flag.Bool("split-udp", false, "experimental separate TCP and datagram WSS lanes (both peers required)")
+	udpWait := flag.Int("udp-wait-ms", 0, "opt-in split UDP/ICMP admission wait, 0..200ms; no buffer expansion")
 	queue := flag.Int("queue-packets", 0, "opt-in split total packet cap 2..256; zero preserves private configuration")
 	flag.Parse()
 	if *show {
@@ -1185,6 +1228,7 @@ func main() {
 		log.Fatal("invalid configuration")
 	}
 	c.SplitUDP = *split
+	c.UDPWaitMS = *udpWait
 	if err = c.overrideQueuePackets(*queue); err != nil {
 		log.Fatal(err)
 	}

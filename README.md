@@ -98,3 +98,7 @@ records references and licensing boundaries. Not yet a WAN-quality or capacity p
 ## Opt-in packet burst trial (preview.5)
 
 The default queue remains unchanged. An explicit, metadata-only `dv-tunnel queue NAME --packets 256` selects 128 slots per split lane, still subject to existing byte/age/write limits; a separate explicit restart applies it. `queue NAME --default` clears the override. This is a finite burst-headroom experiment, not a capacity or lossless guarantee. See [controlled queue trial](docs/QUEUE-BURST-TRIAL.md) for verification, byte caps, latency caveats and safe rollback.
+
+## Opt-in bounded admission trial (preview.6)
+
+The packet-slot trial hit the unchanged byte cap. [Bounded UDP admission](docs/UDP-WAIT-TRIAL.md) restores original packet caps and explicitly allows up to 200 ms admission waiting instead of growing buffers. Defaults remain nonblocking; shared TUN-reader backpressure can increase latency or kernel drops. This remains an unproven field experiment, with unchanged delivery gates and added sampled kernel-counter stops.

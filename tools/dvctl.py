@@ -233,16 +233,22 @@ def split_args(release,link):
     if not isinstance(override,int) or isinstance(override,bool) or override not in (0,*range(2,257)):
         raise SafeError('Queue override must be 0 or 2..256 total packets')
     if override and not value:raise SafeError('Clear queue override with queue NAME --default before selecting single-stream')
+    wait=link.get('udp_wait_ms',0)
+    if not isinstance(wait,int) or isinstance(wait,bool) or not 0<=wait<=200:raise SafeError('UDP wait metadata must be 0..200 milliseconds')
+    if wait and not value:raise SafeError('Clear queue controls with queue NAME --default before selecting single-stream')
     args=[]
-    if value or override:
+    if value or override or wait:
         runner=release/'service_run.py'
         lines=runner.read_text().splitlines() if runner.is_file() else []
         if value and 'SPLIT_UDP_SUPPORT = 1' not in lines:
             raise SafeError('Target runtime cannot honor split-udp; switch both peers to single-stream before downgrade')
         if override and 'QUEUE_OVERRIDE_SUPPORT = 1' not in lines:
             raise SafeError('Target runtime cannot honor queue override; clear it with queue NAME --default and restart before downgrade')
+        if wait and 'UDP_WAIT_SUPPORT = 1' not in lines:
+            raise SafeError('Target runtime cannot honor UDP wait; clear queue controls with queue NAME --default and restart before downgrade')
     if value:args.append('--split-udp')
     if override:args.extend(['--queue-packets',str(override)])
+    if wait:args.extend(['--udp-wait-ms',str(wait)])
     return args
 
 
@@ -277,9 +283,10 @@ def set_profile(name,split):
     print('No restart performed. Set matching profiles on BOTH peers, then explicitly restart each instance.')
 
 
-def set_queue(name,packets):
+def set_queue(name,packets,wait_ms=None):
     name=instance_name(name)
-    if not isinstance(packets,int) or isinstance(packets,bool) or packets not in (0,*range(2,257)):raise SafeError('Use --default or --packets 2..256 (TOTAL across both lanes)')
+    if packets is not None and (not isinstance(packets,int) or isinstance(packets,bool) or packets not in (0,*range(2,257))):raise SafeError('Use --default or --packets 2..256 (TOTAL across both lanes)')
+    if wait_ms is not None and (not isinstance(wait_ms,int) or isinstance(wait_ms,bool) or not 0<=wait_ms<=200):raise SafeError('Use --wait-ms 0..200')
     if name not in instances():raise SafeError('Unknown managed instance')
     release=pointer()
     if not release:raise SafeError('Install DV Tunnel first')
@@ -288,14 +295,19 @@ def set_queue(name,packets):
         if f.is_symlink() or f.stat().st_uid!=os.geteuid() or f.stat().st_mode & 0o077:raise SafeError('Refusing unsafe instance files')
     old=p.read_text();link=json.loads(old)
     if packets and link.get('split_udp') is not True:raise SafeError('Queue override requires the selected split-udp profile')
-    if packets:link['queue_packets_override']=packets
-    else:link.pop('queue_packets_override',None)
+    if packets is not None:
+        if packets:link['queue_packets_override']=packets
+        else:
+            link.pop('queue_packets_override',None);link.pop('udp_wait_ms',None)
+    if wait_ms is not None:
+        if wait_ms:link['udp_wait_ms']=wait_ms
+        else:link.pop('udp_wait_ms',None)
     run([str(release/'dv-tunnel'),'--config',str(cfg),'--check']+split_args(release,link))
     if link==json.loads(old):
         print('Queue setting already selected; no restart performed');return
     atomic_text(ETC/name/'link.queue.previous.json',old)
     atomic_text(p,json.dumps(link,indent=2)+'\n')
-    print('Selected total queue packets:',packets or 'private configuration default','for',name)
+    print('Selected queue controls for',name,'total packets:',link.get('queue_packets_override','private configuration'),'UDP wait ms:',link.get('udp_wait_ms',0))
     print('Byte/age/write limits unchanged. No restart performed; explicitly restart only this instance.')
 
 
@@ -644,6 +656,7 @@ def main():
     queues=ap.add_mutually_exclusive_group()
     queues.add_argument('--packets',type=int)
     queues.add_argument('--default',dest='queue_default',action='store_true')
+    ap.add_argument('--wait-ms',type=int)
     ap.add_argument('--field-dir');ap.add_argument('--local');ap.add_argument('--peer')
     args=ap.parse_args()
     if os.geteuid()!=0:ap.exit(1,'Run with sudo/root. No change was made.\n')
@@ -659,8 +672,8 @@ def main():
                     if not target:raise SafeError('No previous local version')
                     activate(target,args.restart);print('Rolled back to',target.name)
                 elif args.command=='queue':
-                    if not args.name or (args.packets is None and not args.queue_default):raise SafeError('queue needs NAME and --packets N or --default')
-                    set_queue(args.name,0 if args.queue_default else args.packets)
+                    if not args.name or (args.packets is None and not args.queue_default and args.wait_ms is None):raise SafeError('queue needs NAME and --packets N, --default or --wait-ms N')
+                    set_queue(args.name,0 if args.queue_default else args.packets,args.wait_ms)
                 elif args.command=='profile':
                     if not args.name or not (args.split_udp or args.single_stream):raise SafeError('profile needs NAME and --split-udp or --single-stream')
                     set_profile(args.name,args.split_udp)

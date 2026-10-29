@@ -15,6 +15,7 @@ import time
 
 SPLIT_UDP_SUPPORT = 1
 QUEUE_OVERRIDE_SUPPORT = 1
+UDP_WAIT_SUPPORT = 1
 
 def main():
     here=Path(__file__).resolve().parent

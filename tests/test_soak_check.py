@@ -258,3 +258,16 @@ class SoakTests(unittest.TestCase):
         with patch.object(l,'inspect_link',return_value=before),patch.object(l,'stats',return_value=before['stats']),patch.object(l,'write_report') as write,patch.object(S,'QueueDiagnostics'),patch.object(h,'Services'),patch.object(S,'rpc',return_value={'suite':'dv-queue-diagnostic-v1','version':'v0.1.0-preview.5','packet_limits':{'tcp':32,'udp':32}}),patch.object(S,'run_phase') as phase:
             self.assertEqual(S.run(a,live=l,helper=h),1);phase.assert_not_called()
             self.assertIn('Peer lane packet cap',write.call_args.args[2]['error'])
+
+    def test_kernel_counter_increase_stops_test_load(self):
+        from types import SimpleNamespace
+        obj=S.QueueDiagnostics.__new__(S.QueueDiagnostics);obj.samples=[];obj.errors=0;obj.kernel_initial={'rx_dropped':0};obj.load_stop=threading.Event();obj.safety_stop_reason=None
+        obj.done=SimpleNamespace(wait=lambda _:len(obj.samples)>0);obj.sample=lambda:dict(tun_kernel={'rx_dropped':1})
+        obj.loop();self.assertTrue(obj.load_stop.is_set());self.assertIn('TUN kernel',obj.safety_stop_reason)
+
+    def test_wait_expectation_fails_before_observer_or_app_load(self):
+        l,h=helper();before=dict(main_pid=123,stats=dict(version='v0.1.0-preview.6',lanes={'udp':{'queue_wait_ms':0}}))
+        a=argparse.Namespace(role='client',instance='main',iface='wft0',queue_diagnostic=True,expect_version='v0.1.0-preview.6',expect_udp_wait_ms=200,output='unused')
+        with patch.object(l,'inspect_link',return_value=before),patch.object(l,'write_report') as write,patch.object(h,'Services') as services,patch.object(S,'QueueDiagnostics') as obs:
+            self.assertEqual(S.run(a,live=l,helper=h),1);services.assert_not_called();obs.assert_not_called()
+            self.assertIn('Local UDP wait',write.call_args.args[2]['error'])

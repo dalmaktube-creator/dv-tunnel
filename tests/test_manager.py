@@ -274,3 +274,28 @@ class QueueOverrideTests(SplitProfileTests):
         self.assertEqual((d/'link.json').read_bytes(),old)
         p=d/'link.json';p.unlink();p.symlink_to(d/'config.json')
         with self.assertRaises(M.SafeError):M.set_queue('main',256)
+
+class UDPWaitMetadataTests(QueueOverrideTests):
+    def test_wait_is_opt_in_private_preserving_and_old_runner_rejected(self):
+        d,v=self.make_queue_instance();(v/'service_run.py').write_text('SPLIT_UDP_SUPPORT = 1\nQUEUE_OVERRIDE_SUPPORT = 1\nUDP_WAIT_SUPPORT = 1\n')
+        private=(d/'config.json').read_bytes()
+        with patch.object(M,'run'):
+            M.set_queue('main',256)
+            M.set_queue('main',0,200)
+        link=json.loads((d/'link.json').read_text());self.assertNotIn('queue_packets_override',link);self.assertEqual(link['udp_wait_ms'],200)
+        self.assertEqual(M.split_args(v,link),['--split-udp','--udp-wait-ms','200'])
+        self.assertEqual((d/'config.json').read_bytes(),private)
+        (v/'service_run.py').write_text('SPLIT_UDP_SUPPORT = 1\nQUEUE_OVERRIDE_SUPPORT = 1\n')
+        with patch.object(M,'run') as run:
+            with self.assertRaisesRegex(M.SafeError,'cannot honor UDP wait'):M.validate_configs(v)
+            run.assert_not_called()
+            M.set_queue('main',0)
+        self.assertNotIn('udp_wait_ms',json.loads((d/'link.json').read_text()))
+
+    def test_wait_metadata_validation_and_atomic_failure(self):
+        d,v=self.make_queue_instance();old=(d/'link.json').read_bytes()
+        for n in [-1,201,True,'200']:
+            with self.assertRaises(M.SafeError):M.set_queue('main',None,n)
+            with self.assertRaises(M.SafeError):M.split_args(v,dict(split_udp=True,udp_wait_ms=n))
+        with self.assertRaisesRegex(M.SafeError,'cannot honor UDP wait'):M.set_queue('main',0,200)
+        self.assertEqual((d/'link.json').read_bytes(),old)

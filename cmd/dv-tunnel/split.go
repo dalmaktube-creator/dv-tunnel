@@ -84,6 +84,10 @@ func (e *engine) negotiate(r *http.Request) (bool, http.Header, error) {
 }
 
 type laneMetrics struct {
+	queueWaits   atomic.Uint64
+	waitSuccess  atomic.Uint64
+	waitTimeouts atomic.Uint64
+	maxWaitUS    atomic.Uint64
 	queueYields  atomic.Uint64
 	retrySuccess atomic.Uint64
 	drops        [dropReasonCount]atomic.Uint64
@@ -134,13 +138,17 @@ func (e *engine) snapshot() map[string]interface{} {
 		for j, name := range dropNames {
 			reasons[name] = m.drops[j].Load()
 		}
-		info := map[string]interface{}{"connected": false, "tx_datagrams": m.sent.Load(), "rx_datagrams": m.received.Load(), "drop_reasons": reasons, "queue_yields": m.queueYields.Load(), "queue_retry_success": m.retrySuccess.Load(), "max_write_us": m.maxWriteUS.Load(), "writes_over_100ms": m.slowWrites.Load()}
+		info := map[string]interface{}{"connected": false, "tx_datagrams": m.sent.Load(), "rx_datagrams": m.received.Load(), "drop_reasons": reasons, "queue_waits": m.queueWaits.Load(), "queue_wait_success": m.waitSuccess.Load(), "queue_wait_timeouts": m.waitTimeouts.Load(), "queue_wait_max_us": m.maxWaitUS.Load(), "queue_yields": m.queueYields.Load(), "queue_retry_success": m.retrySuccess.Load(), "max_write_us": m.maxWriteUS.Load(), "writes_over_100ms": m.slowWrites.Load()}
 		if s != nil && s.q != nil {
 			info["connected"] = s.ctx.Err() == nil
 			info["queued_packets"] = len(s.q)
 			info["queued_bytes"] = s.qbytes.Load()
 			info["packet_limit"] = cap(s.q)
 			info["byte_limit"] = s.byteBudget()
+			info["queue_wait_ms"] = 0
+			if s.dgram {
+				info["queue_wait_ms"] = s.e.cfg.UDPWaitMS
+			}
 		}
 		lanes[laneName(i == 1)] = info
 	}
