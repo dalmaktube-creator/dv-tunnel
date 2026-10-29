@@ -289,3 +289,36 @@ See [lean observer trial](LEAN-OBSERVER.md).
 Original uploaded report.json SHA256:
 - iran: f3b748a3831361b12f9b91f126859fbb0f16ce32e22ca7b99f9af124b1a73424
 - turkey: 4ad8bd3a486ba06677384a594d257b313e3d382c9a14b071b351fc93d16dbde3
+
+
+## Lean observer / preview.6 — completed mixed-load gate
+
+Client status passed; server completed. The full 30-second phase at 4.8 Mbps
+UDP payload per initiating sender completed. Both directions each sent 15000
+probes and received all 15000 unique valid replies: 30000/30000 combined, no
+missing by deadline, invalid replies, duplicates or per-flow reorder. This
+counts initiating probes and their replies, not total wire datagrams/bytes;
+echo return adds traffic. Eighteen TCP upload/download transactions completed
+with integrity checks and no errors. UDP p99 echo RTT was 151.979 ms for Iran
+initiated probes and 154.457 ms for Turkey initiated probes; not one-way jitter.
+
+No new carrier drops or sampled TUN drop/error increases at either endpoint.
+Sessions/PID snapshots unchanged, cleanup OK, observation errors zero. Each
+endpoint recorded one new bounded admission wait and one success, no timeout.
+Whole-host guard maximum samples: Turkey 82.0%, Iran about 56.48%; no guard stop.
+These are sampled maxima, not universal production-safety guarantees.
+
+This is a real pass of this bounded functional load, NOT a capacity result,
+long-term stability acceptance or proof of an 800 Mbps link. Lower CPU / passing
+after changing observation is not a controlled causal A/B result: baseline host
+load and WAN conditions differed. Lean mode deliberately has no periodic TCP
+socket backlog/retransmission observations. Previous cumulative writer/wait
+maxima must not be described as newly occurring stalls.
+
+Next: [fixed-load stability trial](STEADY-TRIAL.md), same runtime/profile/queues
+and mixed traffic but 120 seconds at the already-passed UDP rate. No speed
+escalation yet. Keep all host and quality gates; retain lean CPU/TUN observation.
+
+Original uploaded report.json SHA256:
+- iran: 7a808ce02bd0a021e9d75c95fc8cca73ef107bb91b7683bf840a39a288bfbfce
+- turkey: 1db3951272eb894d2948e0a977c5056f227565d56631dbc7dc44b26a5700f094

@@ -385,6 +385,12 @@ def run_phase(h,args,spec,stop,ports,progress=None):
     return dict(progress)
 
 
+
+def diagnostic_phases(seconds):
+    if not isinstance(seconds,int) or isinstance(seconds,bool) or seconds not in (30,120):raise ValueError('Diagnostic duration must be 30 or 120 seconds')
+    return [dict(id=1,seconds=seconds,pps=500)]
+
+
 def run(args,live=None,helper=None,phases=None,ports=None):
     os.umask(0o077);diagnostic=getattr(args,'queue_diagnostic',False);lean=getattr(args,'lean_observer',False);report=dict(suite=('dv-queue-diagnostic-lean-v1' if lean else 'dv-queue-diagnostic-v1') if diagnostic else 'dv-soak-v2',role=args.role,status='failed',started_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
         notes=['Only existing test link; no carrier/service/config/firewall/routes changed.',
@@ -398,9 +404,12 @@ def run(args,live=None,helper=None,phases=None,ports=None):
                'Other immediate guards and phase gates remain: host limits, session/PID/profile change, no echo, integrity/reordering, p99>500ms, achieved rate<90%.',
                'Aborted probes use unreturned_at_stop, NOT missing_by_deadline, because the final drain did not complete.',
                'Whole-host CPU85% twice/memory192MiB guards reduce risk, not zero production-impact guarantee.'])
-    guard=services=monitor=observer=None;live=live or load_live();h=helper or live.load_helper();specs=phases or ([dict(id=1,seconds=30,pps=500)] if diagnostic else PHASES)
+    guard=services=monitor=observer=None;live=live or load_live();h=helper or live.load_helper();duration=getattr(args,'diagnostic_seconds',30);specs=phases or (diagnostic_phases(duration) if diagnostic else PHASES)
+    if diagnostic and duration==120:report['suite']+='-120s'
+    report['planned_phases']=specs
     args.expect_profile='split-udp-v1'
     try:
+        if not diagnostic and duration!=30:raise ValueError('Diagnostic duration requires queue diagnostic')
         report['before']=live.inspect_link(args)
         expected=getattr(args,'expect_version',None)
         if expected and report['before']['stats'].get('version')!=expected:raise RuntimeError('Installed carrier version does not match experiment')
@@ -495,7 +504,8 @@ def run(args,live=None,helper=None,phases=None,ports=None):
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('role',choices=['server','client'])
-    ap.add_argument('--queue-diagnostic',action='store_true',help='One 30s 4.8Mbps phase with read-only carrier-owned TCP and TUN counters; no tuning or carrier changes');ap.add_argument('--expect-version');ap.add_argument('--expect-lane-packets',type=int);ap.add_argument('--expect-udp-wait-ms',type=int);ap.add_argument('--instance',default='main');ap.add_argument('--iface',default='wft0')
+    ap.add_argument('--queue-diagnostic',action='store_true',help='One bounded 4.8Mbps phase with read-only carrier-owned TCP and TUN counters; no tuning or carrier changes');ap.add_argument('--expect-version');ap.add_argument('--expect-lane-packets',type=int);ap.add_argument('--expect-udp-wait-ms',type=int);ap.add_argument('--instance',default='main');ap.add_argument('--iface',default='wft0')
+    ap.add_argument('--diagnostic-seconds',type=int,choices=(30,120),default=30,help='Queue diagnostic duration only; fixed UDP rate and unchanged safety gates')
     ap.add_argument('--lean-observer',action='store_true',help='Queue diagnostic only: verify sockets once, keep CPU/TUN and safety polling; no periodic ss process scans')
     ap.add_argument('--cpu-baseline-seconds',type=int,default=0,help='0..30 seconds without test load before services; queue diagnostic only; safety guards unchanged')
     ap.add_argument('--local');ap.add_argument('--peer');ap.add_argument('--output')

@@ -143,7 +143,7 @@ class SoakTests(unittest.TestCase):
         self.assertEqual(r['udp_local_initiated'],partial);self.assertIsNone(r['udp_peer_initiated'])
         self.assertIn('TimeoutError',r['tcp']['errors']);self.assertFalse(S.phase_ok(r))
 
-    def _two_role_suite(self,diagnostic=False):
+    def _two_role_suite(self,diagnostic=False,diagnostic_seconds=30,lean=False):
         l,h=helper();h.SIZE=4096;h.PAYLOAD=bytes(range(256))*16;h.HASH=hashlib.sha256(h.PAYLOAD).hexdigest()
         pacer=h.Pacer
         before=dict(main_pid=123,stats=dict(version='v0.1.0-preview.3',connected=1,sessions=2,drops=0,spoofed_drops=0,tx_datagrams=0,rx_datagrams=0,drop_reasons={},transport_profile='split-udp-v1'))
@@ -154,7 +154,7 @@ class SoakTests(unittest.TestCase):
         for s in held:s.close()
         phases=[dict(id=1,seconds=.2,pps=100),dict(id=2,seconds=.2,pps=200)]
         with tempfile.TemporaryDirectory() as tmp,patch.object(l,'inspect_link',return_value=before),patch.object(l,'stats',return_value=before['stats']),patch.object(h,'Pacer',side_effect=lambda mbps=2:pacer(mbps=100)),patch.object(h,'Carrier',side_effect=AssertionError('No carrier control')):
-            server=argparse.Namespace(role='server',local='127.0.0.1',peer='127.0.0.1',instance='main',iface='unused',output=tmp+'/server',queue_diagnostic=diagnostic)
+            server=argparse.Namespace(role='server',local='127.0.0.1',peer='127.0.0.1',instance='main',iface='unused',output=tmp+'/server',queue_diagnostic=diagnostic,diagnostic_seconds=diagnostic_seconds,lean_observer=lean)
             client=argparse.Namespace(**dict(vars(server),role='client',output=tmp+'/client'))
             values=[]
             t=threading.Thread(target=lambda:values.append(S.run(server,live=l,helper=h,phases=phases,ports=tuple(ports))),daemon=True);t.start()
@@ -162,7 +162,7 @@ class SoakTests(unittest.TestCase):
             while True:
                 try:
                     greeting=S.rpc(h,'127.0.0.1',ports[0],dict(op='ping'))
-                    if greeting.get('suite')==('dv-queue-diagnostic-v1' if diagnostic else 'dv-soak-v2'):break
+                    if greeting.get('suite')==((('dv-queue-diagnostic-lean-v1' if lean else 'dv-queue-diagnostic-v1')+('-120s' if diagnostic_seconds==120 else '')) if diagnostic else 'dv-soak-v2'):break
                 except OSError:pass
                 if time.monotonic()>deadline:self.fail('Server did not start')
                 time.sleep(.02)
@@ -173,8 +173,21 @@ class SoakTests(unittest.TestCase):
             self.assertTrue(d['carrier_main_pid_unchanged']);self.assertEqual(d['test_socket_cleanup'],'OK')
             self.assertTrue(all(x['tcp']['completed']>0 for x in d['phases']))
 
-            self.assertEqual(d['suite'],'dv-queue-diagnostic-v1' if diagnostic else 'dv-soak-v2')
+            self.assertEqual(d['suite'],(('dv-queue-diagnostic-lean-v1' if lean else 'dv-queue-diagnostic-v1')+('-120s' if diagnostic_seconds==120 else '')) if diagnostic else 'dv-soak-v2')
             if diagnostic:self.assertIn('queue_diagnostics',d)
+
+    def test_extended_diagnostic_is_same_rate_and_bounded(self):
+        self.assertEqual(S.diagnostic_phases(30),[dict(id=1,seconds=30,pps=500)])
+        self.assertEqual(S.diagnostic_phases(120),[dict(id=1,seconds=120,pps=500)])
+        self.assertEqual(S.diagnostic_phases(120)[0]['pps']*120,60000)
+        for value in (0,31,121,True,'120'):
+            with self.assertRaises(ValueError):S.diagnostic_phases(value)
+
+    def test_long_lean_mode_two_role_handshake_with_short_fixture(self):
+        class Observer:
+            def __init__(self,pid,iface,lean=False):pass
+            def close(self):return dict(samples=[],observation_errors=0)
+        with patch.object(S,'QueueDiagnostics',Observer):self._two_role_suite(True,120,True)
 
     def test_two_role_suite_without_carrier_or_config_access(self):
         self._two_role_suite()
