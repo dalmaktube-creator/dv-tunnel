@@ -194,16 +194,16 @@ class SoakTests(unittest.TestCase):
 
     def test_diagnostic_sampling_is_read_only_fixed_argv(self):
         from types import SimpleNamespace
-        obj=S.QueueDiagnostics.__new__(S.QueueDiagnostics);obj.ss='/usr/bin/ss';obj.pid=123;obj.iface='wft0'
+        obj=S.QueueDiagnostics.__new__(S.QueueDiagnostics);obj.ss='/usr/bin/ss';obj.pid=123;obj.identity=(100,234);obj.iface='wft0'
         output='ESTAB 0 0 A:42443 B:1 users:(("dv-tunnel",pid=123,fd=6))\n    cubic rtt:50/2\n'
-        with patch.object(S.subprocess,'run',return_value=SimpleNamespace(stdout=output)) as run,patch.object(Path,'read_text',return_value='0'):
+        with patch.object(S,'process_identity',return_value=(100,234)),patch.object(S.subprocess,'run',return_value=SimpleNamespace(stdout=output)) as run,patch.object(Path,'read_text',return_value='0'):
             result=obj.sample()
         self.assertEqual(len(result['tcp_sockets']),1);self.assertEqual(result['tun_kernel']['tx_dropped'],0)
         self.assertEqual(run.call_args.args[0],['/usr/bin/ss','-Htinp','( sport = :42443 or dport = :42443 )'])
         self.assertNotIn('shell',run.call_args.kwargs);self.assertEqual(run.call_args.kwargs['timeout'],.5)
 
     def test_diagnostic_preflight_fails_before_any_thread_when_sockets_missing(self):
-        with patch.object(S.shutil,'which',return_value='/usr/bin/ss'),patch.object(S.QueueDiagnostics,'sample',return_value=dict(tcp_sockets=[])),patch.object(S.threading,'Thread') as t:
+        with patch.object(S,'resolve_carrier_pid',return_value=124),patch.object(S,'process_identity',return_value=(123,234)),patch.object(S.shutil,'which',return_value='/usr/bin/ss'),patch.object(S.QueueDiagnostics,'sample',return_value=dict(tcp_sockets=[])),patch.object(S.threading,'Thread') as t:
             with self.assertRaisesRegex(RuntimeError,'two established'):S.QueueDiagnostics(123,'wft0')
             t.assert_not_called()
         with self.assertRaises(ValueError):S.QueueDiagnostics(123,'../../etc')
@@ -224,3 +224,21 @@ class SoakTests(unittest.TestCase):
                 result=S.run(a,live=l,helper=h)
                 self.assertEqual(result,1);phase.assert_not_called()
                 self.assertIn('same checker mode',write.call_args.args[2]['error'])
+
+    def test_carrier_socket_pid_is_runner_child_not_mainpid(self):
+        def read(path,*a,**kw):
+            text=str(path)
+            if text.endswith('/children'):return '124 125'
+            if text.endswith('/cgroup'):return '0::/system.slice/dv-tunnel@main.service'
+            raise AssertionError('Unexpected file '+text)
+        with patch.object(Path,'read_text',read),patch.object(S.os,'readlink',side_effect=lambda p:'/opt/dv-tunnel/releases/v0.1.0-preview.4/'+('dv-tunnel' if '/124/' in str(p) else 'other')),patch.object(S,'process_identity',return_value=(123,555)):
+            self.assertEqual(S.resolve_carrier_pid(123),124)
+        with patch.object(Path,'read_text',read),patch.object(S.os,'readlink',return_value='/opt/bin/dv-tunnel'),patch.object(S,'process_identity',return_value=(123,555)):
+            with self.assertRaisesRegex(RuntimeError,'one direct'):S.resolve_carrier_pid(123)
+        with patch.object(Path,'read_text',read),patch.object(S.os,'readlink',return_value='/opt/bin/dv-tunnel'),patch.object(S,'process_identity',return_value=(999,555)):
+            with self.assertRaisesRegex(RuntimeError,'one direct'):S.resolve_carrier_pid(123)
+
+    def test_reused_socket_pid_is_not_observed_as_same_carrier(self):
+        obj=S.QueueDiagnostics.__new__(S.QueueDiagnostics);obj.pid=124;obj.identity=(123,555)
+        with patch.object(S,'process_identity',return_value=(123,556)),patch.object(S.subprocess,'run') as run:
+            result=obj.sample();run.assert_not_called();self.assertEqual(result['error_type'],'RuntimeError')

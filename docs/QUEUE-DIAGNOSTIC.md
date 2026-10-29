@@ -24,7 +24,10 @@ the retry. Do not increase caps or replace the transport based on this alone.
 
 The focused mode reads numeric TCP fields from `ss -Htinp` at half-second
 intervals, retaining ONLY established sockets owned by the already-verified
-carrier PID and using port 42443. Saved data include socket FD, send/receive
+carrier process and using port 42443. The service MainPID is the Python runner,
+not the Go binary: the observer resolves its unique direct dv-tunnel child,
+checks parent PID and matching cgroup, and guards kernel process start ticks
+against PID reuse. Saved data include socket FD, send/receive
 queue sizes, and a fixed allowlist of numeric TCP fields such as RTT, cwnd,
 retransmission and notsent counters. Addresses, process arguments, unrelated
 sockets and raw command output are NOT saved. Interface-wide TUN packet/drop/error

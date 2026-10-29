@@ -65,10 +65,38 @@ def parse_tcp_samples(text,pid):
     return result[:8]
 
 
+def process_identity(pid):
+    # /proc stat comm can contain spaces and parentheses; fields follow LAST ')'.
+    text=(Path('/proc')/str(pid)/'stat').read_text()
+    if len(text)>8192:raise ValueError('Process identity too large')
+    fields=text.rsplit(')',1)[1].split()
+    return int(fields[1]),int(fields[19])  # parent PID, kernel start ticks
+
+
+def resolve_carrier_pid(service_pid):
+    # MainPID belongs to service_run.py; only its verified direct carrier child
+    # owns the WSS sockets. Never scan or trust arbitrary process names globally.
+    root=Path('/proc')/str(service_pid)
+    text=(root/'task'/str(service_pid)/'children').read_text()
+    if len(text)>4096 or len(text.split())>16:raise RuntimeError('Unexpected service child inventory')
+    group=(root/'cgroup').read_text();found=[]
+    for token in text.split():
+        child=int(token)
+        if child<=0:raise RuntimeError('Invalid child PID')
+        path=Path('/proc')/str(child)
+        try:
+            if Path(os.readlink(path/'exe')).name!='dv-tunnel':continue
+            if process_identity(child)[0]!=service_pid or (path/'cgroup').read_text()!=group:continue
+        except FileNotFoundError:continue
+        found.append(child)
+    if len(found)!=1:raise RuntimeError('Expected one direct carrier child in the service cgroup')
+    return found[0]
+
+
 class QueueDiagnostics:
     def __init__(self,pid,iface):
         if not isinstance(pid,int) or pid<=0 or not re.fullmatch(r'[a-zA-Z0-9_-]{1,15}',iface):raise ValueError('Diagnostic identity invalid')
-        self.pid,self.iface=pid,iface;self.ss=shutil.which('ss')
+        self.service_pid=pid;self.pid=resolve_carrier_pid(pid);self.identity=process_identity(self.pid);self.iface=iface;self.ss=shutil.which('ss')
         if not self.ss:raise RuntimeError('ss is required for queue diagnostics')
         self.samples=[];self.done=threading.Event();self.errors=0;self.thread=None
         first=self.sample()
@@ -78,6 +106,7 @@ class QueueDiagnostics:
     def sample(self):
         result=dict(monotonic=time.monotonic(),utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))
         try:
+            if process_identity(self.pid)!=self.identity:raise RuntimeError('Carrier process identity changed')
             p=subprocess.run([self.ss,'-Htinp','( sport = :42443 or dport = :42443 )'],capture_output=True,text=True,timeout=.5,check=True)
             if len(p.stdout)>1048576:raise ValueError('Socket observation too large')
             result['tcp_sockets']=parse_tcp_samples(p.stdout,self.pid)
@@ -94,9 +123,9 @@ class QueueDiagnostics:
         self.done.set()
         if self.thread:self.thread.join(2)
         return dict(kind='carrier-owned-tcp-and-tun-v1',sample_interval_s=.5,max_samples=900,
-                    samples=self.samples,observation_errors=self.errors,
+                    service_pid=self.service_pid,socket_pid=self.pid,samples=self.samples,observation_errors=self.errors,
                     sample_cap_reached=len(self.samples)>=900,
-                    notes=['Read-only numeric ss fields, filtered by carrier PID, established sockets and TCP port 42443.',
+                    notes=['Service MainPID is the Python runner; socket PID is its unique dv-tunnel child verified by PPid, cgroup and kernel start ticks. Numeric ss fields only, established sockets on TCP port 42443.',
                            'FD identifies a local socket only; not a proven UDP/TCP lane mapping. FD can be reused after reconnect.',
                            'Socket counters are cumulative: compare same socket over time, not endpoint totals.',
                            'Half-second polling can miss short stalls; no causal WAN or loss attribution from a correlation alone.',
