@@ -86,3 +86,10 @@ buffer is not a guarantee of better latency.
 
 The original panel repository is not changed by this extraction. Published preview releases remain experimental. Public visibility does not grant
 an open-source license; see LICENSE.
+
+## Optional mixed-traffic isolation experiment
+
+[split-udp-v1](docs/SPLIT-UDP.md) in preview.3 uses two negotiated WSS/TCP
+connections, with aggregate queue budgets divided between them. Default behavior
+is unchanged; both peers must explicitly opt in. [TCP-only source review](docs/TCP-REVIEW.md)
+records references and licensing boundaries. Not yet a WAN-quality or capacity pass.

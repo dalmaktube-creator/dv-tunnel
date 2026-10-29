@@ -12,7 +12,8 @@ repository remains untouched.
 
 The core supports UDP relay and raw-IP TUN. Standalone primary use is TUN.
 Wire encoding, TLS validation, reconnect, offload, bounded queues and default
-queue settings remain unchanged by extraction.
+queue settings remained unchanged at initial extraction. Later DV changes are
+listed separately in the manifest and SPLIT-UDP.md.
 
 ## Operator field checkpoint, 2026-10-29
 
@@ -57,3 +58,25 @@ and report actual offered rate, not only requested load.
    not an unbounded 800 Mbps blast at production servers.
 4. Review/implement external-link attachment in WG panel, after inspecting actual
    Easy Mesh lifecycle, policy routing and accounting contracts.
+
+## Mixed live-link failure checkpoint
+
+The operator provided dv-live-iran.zip and dv-live-turkey.zip for the same existing
+preview.2 link. Four TCP upload/download checks (256 KiB each direction) passed
+content integrity. Concurrent UDP initiation returned 1681/2000 from Iran
+(319 missing by drain, 15.95%) and 1486/2000 from Turkey (514, 25.7%). Zero invalid
+or duplicate UDP payloads were reported. PID unchanged and session delta zero on
+both peers; test sockets closed, carrier left running.
+
+Carrier drop deltas: Iran545 (queue_packets481, queue_expired64), Turkey313
+(queue_packets249, queue_expired64). Aggregate858 differs from UDP missing833:
+these counters include TCP/control/IP packets, not sequence-attributed losses.
+Queue-byte drops zero. This establishes local queue pressure/expiry, NOT measured
+WAN retransmission causality. No capacity claim follows.
+
+Input archive SHA256:
+- Iran: e333b059d62601e8f268a8b81044a7b4c0f5b72d81aae07d21cb551c4d7d1512
+- Turkey: bc6e69cb619757ff552941ae06c4942d2ad4d25e9545a303051b4945a495958e
+
+Next opt-in experiment: SPLIT-UDP.md. TCP-only static reference review:
+TCP-REVIEW.md. No remote change or automatic profile migration was performed.

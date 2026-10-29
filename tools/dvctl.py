@@ -226,11 +226,46 @@ def active(name):
     return subprocess.run(['systemctl','is-active','--quiet','dv-tunnel@'+instance_name(name)+'.service'],capture_output=True,timeout=10).returncode==0
 
 
+def split_args(release,link):
+    value=link.get('split_udp',False)
+    if not isinstance(value,bool):raise SafeError('split_udp metadata must be boolean')
+    if value:
+        runner=release/'service_run.py'
+        if not runner.is_file() or 'SPLIT_UDP_SUPPORT = 1' not in runner.read_text().splitlines():
+            raise SafeError('Target runtime cannot honor split-udp; switch both peers to single-stream before downgrade')
+        return ['--split-udp']
+    return []
+
+
 def validate_configs(release):
     for name in instances():
         p=ETC/name/'config.json'
-        if p.is_symlink() or p.stat().st_mode & 0o077:raise SafeError('Private config permissions must be 0600')
-        run([str(release/'dv-tunnel'),'--config',str(p),'--check'])
+        lp=ETC/name/'link.json'
+        for f in (p,lp):
+            if f.is_symlink() or f.stat().st_uid!=os.geteuid() or f.stat().st_mode & 0o077:
+                raise SafeError('Instance files must be owned by the runner with private 0600 permissions')
+        link=json.loads(lp.read_text())
+        run([str(release/'dv-tunnel'),'--config',str(p),'--check']+split_args(release,link))
+
+
+def set_profile(name,split):
+    name=instance_name(name)
+    if name not in instances():raise SafeError('Unknown managed instance')
+    release=pointer()
+    if not release:raise SafeError('Install DV Tunnel first')
+    p=ETC/name/'link.json';cfg=ETC/name/'config.json'
+    for f in (p,cfg):
+        if f.is_symlink() or f.stat().st_uid!=os.geteuid() or f.stat().st_mode & 0o077:
+            raise SafeError('Refusing unsafe instance files')
+    old=p.read_text();link=json.loads(old)
+    link['split_udp']=split
+    run([str(release/'dv-tunnel'),'--config',str(cfg),'--check']+split_args(release,link))
+    if json.loads(old).get('split_udp',False)==split:
+        print('Profile already selected; runtime has not been restarted');return
+    atomic_text(ETC/name/'link.previous.json',old)
+    atomic_text(p,json.dumps(link,indent=2)+'\n')
+    print('Selected',('split-udp-v1' if split else 'single-stream'),'for',name)
+    print('No restart performed. Set matching profiles on BOTH peers, then explicitly restart each instance.')
 
 
 def require_managed_files():
@@ -567,11 +602,14 @@ def menu():
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('command',nargs='?',default='menu',choices=['menu','install','update','rollback','check-update','status','import','start','stop','restart'])
+    ap.add_argument('command',nargs='?',default='menu',choices=['menu','install','update','rollback','check-update','status','import','start','stop','restart','profile'])
     ap.add_argument('name',nargs='?')
     ap.add_argument('--version',dest='version')
     ap.add_argument('--restart',action='store_true',help='explicitly allow restarting active managed instances')
     ap.add_argument('--yes',action='store_true')
+    profiles=ap.add_mutually_exclusive_group()
+    profiles.add_argument('--split-udp',action='store_true')
+    profiles.add_argument('--single-stream',action='store_true')
     ap.add_argument('--field-dir');ap.add_argument('--local');ap.add_argument('--peer')
     args=ap.parse_args()
     if os.geteuid()!=0:ap.exit(1,'Run with sudo/root. No change was made.\n')
@@ -586,6 +624,9 @@ def main():
                     target=pointer('previous')
                     if not target:raise SafeError('No previous local version')
                     activate(target,args.restart);print('Rolled back to',target.name)
+                elif args.command=='profile':
+                    if not args.name or not (args.split_udp or args.single_stream):raise SafeError('profile needs NAME and --split-udp or --single-stream')
+                    set_profile(args.name,args.split_udp)
                 elif args.command=='import':
                     if not all((args.name,args.field_dir,args.local,args.peer)):raise SafeError('import needs NAME --field-dir --local CIDR --peer IP')
                     import_instance(args.name,args.field_dir,args.local,args.peer)

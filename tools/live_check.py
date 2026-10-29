@@ -20,7 +20,7 @@ HELPER_COMMIT='d5709c0a731d3a3c351b505999e6abebe986b9f5'
 HELPER_SHA256='c686c9ae1b87250bcf7fedc6c639da450b51e7d7c1d8e14fa4eeb5d6b9fcc6b4'
 HELPER_URL='https://raw.githubusercontent.com/dalmaktube-creator/dv-tunnel/'+HELPER_COMMIT+'/tools/acceptance.py'
 STATE=Path('/var/lib/dv-tunnel')
-VERSION='dv-live-check-v1'
+VERSION='dv-live-check-v2'
 
 
 def load_helper():
@@ -53,7 +53,7 @@ def stats(name):
         raise RuntimeError('Managed statistics missing or stale')
     d=json.loads(p.read_text())
     if d.get('connected')!=1:raise RuntimeError('Managed link is not connected')
-    return {k:d[k] for k in ('version','connected','sessions','tx_datagrams','rx_datagrams','drops','spoofed_drops','drop_reasons') if k in d}
+    return {k:d[k] for k in ('version','connected','sessions','tx_datagrams','rx_datagrams','drops','spoofed_drops','drop_reasons','transport_profile','lanes') if k in d}
 
 
 def inspect_link(args):
@@ -72,7 +72,11 @@ def inspect_link(args):
         raise RuntimeError('Local /30 is not assigned to the selected interface')
     route=json.loads(read_command(['ip','-j','-4','route','get',args.peer]))
     if not route or any(r.get('dev')!=args.iface for r in route):raise RuntimeError('Peer route does not use the selected TUN')
-    return dict(main_pid=pid,stats=stats(args.instance))
+    counters=stats(args.instance)
+    expected=getattr(args,'expect_profile',None)
+    if expected and counters.get('transport_profile')!=expected:
+        raise RuntimeError('Runtime profile does not match requested experiment')
+    return dict(main_pid=pid,stats=counters)
 
 
 def deltas(before,after):
@@ -85,6 +89,22 @@ def deltas(before,after):
     for k in sorted(keys):
         a=after.get('drop_reasons',{}).get(k,0);b=before.get('drop_reasons',{}).get(k,0)
         result['drop_reasons'][k]=a-b if a>=b else None
+    if before.get('transport_profile')!=after.get('transport_profile'):
+        result['profile_changed']=True
+    result['lanes']={}
+    for lane in set(before.get('lanes',{}))|set(after.get('lanes',{})):
+        b=before.get('lanes',{}).get(lane,{});a=after.get('lanes',{}).get(lane,{})
+        d={}
+        for key in ('tx_datagrams','rx_datagrams','writes_over_100ms'):
+            if isinstance(a.get(key),int) and isinstance(b.get(key),int):
+                d[key]=a[key]-b[key] if a[key]>=b[key] else None
+        d['drop_reasons']={}
+        for key in set(b.get('drop_reasons',{}))|set(a.get('drop_reasons',{})):
+            av=a.get('drop_reasons',{}).get(key,0);bv=b.get('drop_reasons',{}).get(key,0)
+            d['drop_reasons'][key]=av-bv if av>=bv else None
+        # Maximum is cumulative since process start, not a subtractable counter.
+        d['max_write_us_since_start']=a.get('max_write_us')
+        result['lanes'][lane]=d
     return result
 
 
@@ -198,6 +218,7 @@ def run(args,helper=None,ports=None):
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('role',choices=['server','client'])
+    ap.add_argument('--expect-profile',choices=['single-stream','split-udp-v1'])
     ap.add_argument('--instance',default='main');ap.add_argument('--iface',default='wft0')
     ap.add_argument('--local');ap.add_argument('--peer')
     ap.add_argument('--output',default='/root/dv-live-check-results')

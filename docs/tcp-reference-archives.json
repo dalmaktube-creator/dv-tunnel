@@ -1,0 +1,9 @@
+{
+  "scope": "TCP-only static reference review; not copied into DV",
+  "sha256": {
+    "KCP_tunnel-main.zip": "92bd7f455822013f7babb6c03b687a1738c667675924651754e5bac0c9863959",
+    "rathole-dev-latest.zip": "621b53790476a5b088a03b7fc10faa71e5e642f82f3db23cb50f1efc164735a7",
+    "BackPack-1.8.5.zip": "a0408811d5a95d9417f8b8858e8e98a1e5f160f287028a934a1c31e3883d1e92",
+    "Kariz-main.zip": "ff872316f37c6a2c765800eb0854a123b4dab223da44a95553b20aaa347d630f"
+  }
+}

@@ -108,3 +108,18 @@ class LiveCheckTests(unittest.TestCase):
             self.assertEqual(s['status'],'completed')
             self.assertTrue(c['peer']['carrier_main_pid_unchanged'])
             self.assertEqual(c['test_socket_cleanup'],'OK');self.assertEqual(s['test_socket_cleanup'],'OK')
+
+
+class LaneReportTests(unittest.TestCase):
+    def test_lane_deltas_do_not_subtract_maxima(self):
+        a=dict(transport_profile='split-udp-v1',lanes=dict(udp=dict(tx_datagrams=4,rx_datagrams=5,writes_over_100ms=2,max_write_us=1000,drop_reasons=dict(queue_packets=2))))
+        b=dict(transport_profile='split-udp-v1',lanes=dict(udp=dict(tx_datagrams=8,rx_datagrams=9,writes_over_100ms=3,max_write_us=2000,drop_reasons=dict(queue_packets=3))))
+        d=L.deltas(a,b)['lanes']['udp']
+        self.assertEqual(d['tx_datagrams'],4);self.assertEqual(d['drop_reasons']['queue_packets'],1)
+        self.assertEqual(d['writes_over_100ms'],1);self.assertEqual(d['max_write_us_since_start'],2000)
+
+    def test_expected_profile_is_enforced(self):
+        args=argparse.Namespace(instance='main',iface='wft0',local='10.254.253.1',peer='10.254.253.2',expect_profile='split-udp-v1')
+        replies=['active','123',json.dumps([dict(addr_info=[dict(local=args.local,prefixlen=30)])]),json.dumps([dict(dev='wft0')])]
+        with patch.object(L,'read_command',side_effect=replies),patch.object(L,'stats',return_value=dict(connected=1,transport_profile='single-stream')):
+            with self.assertRaisesRegex(RuntimeError,'profile'):L.inspect_link(args)

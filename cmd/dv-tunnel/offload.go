@@ -103,6 +103,9 @@ func vnetHeader(h []byte, flags uint8, gso uint16, p []byte) error {
 
 // deliverOffload writes one validated (super-)packet to the vnet TUN.
 func (s *session) deliverOffload(flags uint8, gso uint16, p []byte) error {
+	if s.e.cfg.SplitUDP && datagramIP(p) != s.dgram {
+		return errors.New("wrong transport lane")
+	}
 	if !s.e.sourceAllowed(p) {
 		s.e.m.Spoofed.Add(1)
 		return nil
@@ -112,12 +115,12 @@ func (s *session) deliverOffload(flags uint8, gso uint16, p []byte) error {
 	}
 	b := s.scratch[:vnetHdrLen+len(p)]
 	if vnetHeader(b, flags, gso, p) != nil {
-		s.e.m.drop(dropInvalidVnetMetadata)
+		s.drop(dropInvalidVnetMetadata)
 		return nil
 	}
 	copy(b[vnetHdrLen:], p)
 	if _, err := s.e.tun.Write(b); err != nil {
-		s.e.m.drop(dropTUNWrite)
+		s.drop(dropTUNWrite)
 	}
 	return nil
 }
@@ -152,13 +155,6 @@ func (e *engine) readOffload(ctx context.Context) {
 			e.m.drop(dropUnsupportedOffload)
 			continue
 		}
-		e.mu.Lock()
-		s := e.current
-		if s != nil && s.q != nil {
-			s.enqueueMeta(tunFlow, b[vnetHdrLen:n], flags, gso)
-		} else {
-			e.m.drop(dropNoSessionOrOversize)
-		}
-		e.mu.Unlock()
+		e.enqueueIP(b[vnetHdrLen:n], flags, gso)
 	}
 }

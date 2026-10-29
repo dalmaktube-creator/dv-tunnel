@@ -13,6 +13,8 @@ import tempfile
 import time
 
 
+SPLIT_UDP_SUPPORT = 1
+
 def main():
     here=Path(__file__).resolve().parent
     spec=importlib.util.spec_from_file_location('dvctl',here/'dvctl.py')
@@ -36,7 +38,8 @@ def main():
     if cfg.get('stats_file')!=str(manager.STATE/name/'stats.json'):
         raise manager.SafeError('Statistics must remain inside managed instance state')
     binary=here/'dv-tunnel'
-    manager.run([str(binary),'--config',str(config_path),'--check'])
+    extra=manager.split_args(here,link)
+    manager.run([str(binary),'--config',str(config_path),'--check']+extra)
     if subprocess.run(['ip','link','show','dev',iface],capture_output=True).returncode==0:
         raise manager.SafeError('Interface already exists; refusing to reuse or delete it')
     port=0
@@ -49,7 +52,7 @@ def main():
     def interrupted(signum,frame):raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM,interrupted)
     try:
-        proc=subprocess.Popen([str(binary),'--config',str(config_path)])
+        proc=subprocess.Popen([str(binary),'--config',str(config_path)]+extra)
         ready=False
         for _ in range(100):
             if proc.poll() is not None:raise manager.SafeError('Owned carrier exited before TUN setup')

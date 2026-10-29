@@ -32,3 +32,7 @@ The server finish reply is a checkpoint before its own test-socket cleanup; its
 separate final report confirms that cleanup. A client pass does not prove peer
 cleanup. The service remains running after either checker exits. Reports contain
 neither private config nor payload captures; share the generated report ZIPs.
+
+Checker v2 also preserves safe transport_profile and per-lane snapshots and
+calculates per-lane counter deltas when the runtime provides them. Cumulative
+max_write_us is labeled since-start, never subtracted. Loads and helper are unchanged.

@@ -82,6 +82,8 @@ type config struct {
 	QueuePackets int `json:"queue_packets,omitempty"`
 	// Byte cap of the outgoing queue; 0 leaves only the packet cap active.
 	QueueBytes int `json:"queue_bytes,omitempty"`
+	// Opt-in CLI feature; never written into legacy private configurations.
+	SplitUDP bool `json:"-"`
 }
 
 func (c config) packetQueueSize() int {
@@ -121,6 +123,9 @@ func (c config) sources() ([]netip.Prefix, error) {
 }
 
 func (c config) validate() error {
+	if c.SplitUDP && (c.TUN == "" || c.packetQueueSize() < 2 || c.QueueBytes == 1) {
+		return errors.New("split-udp requires TUN mode, at least 2 queue packets, and byte budget 0 or >=2")
+	}
 	if c.Role != "ingress" && c.Role != "egress" {
 		return errors.New("role must be ingress or egress")
 	}
@@ -374,13 +379,15 @@ type flow struct {
 	seen time.Time
 }
 type engine struct {
-	cfg     config
-	m       metrics
-	mu      sync.Mutex
-	current *session
-	udp     *net.UDPConn
-	tun     *os.File
-	allowed []netip.Prefix
+	cfg      config
+	m        metrics
+	mu       sync.Mutex
+	current  *session
+	datagram *session
+	lanes    [2]laneMetrics
+	udp      *net.UDPConn
+	tun      *os.File
+	allowed  []netip.Prefix
 }
 
 // sourceAllowed drops IP packets whose source the peer may not use.
@@ -403,36 +410,93 @@ func (e *engine) sourceAllowed(p []byte) bool {
 }
 
 type session struct {
-	e        *engine
-	ws       *websocket.Conn
-	ctx      context.Context
-	cancel   context.CancelFunc
-	q        chan packet
-	mu       sync.Mutex
-	flows    map[uint64]*flow
-	addrs    map[string]uint64
-	next     uint64
-	wg       sync.WaitGroup
-	finished chan struct{}
-	scratch  []byte
-	qbytes   atomic.Int64
+	e         *engine
+	ws        *websocket.Conn
+	ctx       context.Context
+	cancel    context.CancelFunc
+	q         chan packet
+	mu        sync.Mutex
+	flows     map[uint64]*flow
+	addrs     map[string]uint64
+	next      uint64
+	wg        sync.WaitGroup
+	finished  chan struct{}
+	scratch   []byte
+	qbytes    atomic.Int64
+	dgram     bool
+	byteLimit int
 }
 
 // took releases a dequeued packet's share of the byte budget.
 func (s *session) took(p packet) packet { s.qbytes.Add(-int64(len(p.data))); return p }
 
 func (e *engine) reserve(ws *websocket.Conn, ctx context.Context) *session {
+	return e.reserveLane(ws, ctx, false, nil)
+}
+
+// slot and readiness require e.mu. An upgrade placeholder is never ready.
+func (e *engine) slot(dgram bool) **session {
+	if dgram {
+		return &e.datagram
+	}
+	return &e.current
+}
+func (e *engine) readiness() {
+	ready := func(s *session) bool { return s != nil && s.q != nil && s.ctx.Err() == nil }
+	if ready(e.current) && (!e.cfg.SplitUDP || ready(e.datagram)) {
+		e.m.Connected.Store(1)
+	} else {
+		e.m.Connected.Store(0)
+	}
+}
+func (e *engine) reserveLane(ws *websocket.Conn, ctx context.Context, dgram bool, hold *session) *session {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.current != nil {
+	slot := e.slot(dgram)
+	if *slot != hold {
+		return nil
+	}
+	if ctx.Err() != nil {
+		*slot = nil
+		e.readiness()
 		return nil
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	s := &session{e: e, ws: ws, ctx: ctx, cancel: cancel, q: make(chan packet, e.cfg.packetQueueSize()), flows: map[uint64]*flow{}, addrs: map[string]uint64{}, finished: make(chan struct{})}
-	e.current = s
-	e.m.Connected.Store(1)
+	packets, budget := e.cfg.packetQueueSize(), e.cfg.QueueBytes
+	if e.cfg.SplitUDP {
+		packets /= 2
+		budget /= 2
+		if !dgram {
+			packets += e.cfg.packetQueueSize() % 2
+			budget += e.cfg.QueueBytes % 2
+		}
+	}
+	s := &session{e: e, ws: ws, ctx: ctx, cancel: cancel, q: make(chan packet, packets), flows: map[uint64]*flow{}, addrs: map[string]uint64{}, finished: make(chan struct{}), dgram: dgram, byteLimit: budget}
+	*slot = s
+	e.readiness()
 	e.m.Sessions.Add(1)
 	return s
+}
+
+// Select under e.mu, then copy into a bounded independent writer queue.
+func (e *engine) enqueueIP(p []byte, flags uint8, gso uint16) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	s := e.current
+	if e.cfg.SplitUDP && datagramIP(p) {
+		s = e.datagram
+	}
+	if s == nil || s.q == nil {
+		e.m.drop(dropNoSessionOrOversize)
+		return
+	}
+	s.enqueueMeta(tunFlow, p, flags, gso)
+}
+func (s *session) byteBudget() int {
+	if s.e.cfg.SplitUDP {
+		return s.byteLimit
+	}
+	return s.e.cfg.QueueBytes
 }
 func (s *session) enqueue(id uint64, p []byte) { s.enqueueMeta(id, p, 0, 0) }
 func (s *session) enqueueMeta(id uint64, p []byte, flags uint8, gso uint16) {
@@ -441,20 +505,20 @@ func (s *session) enqueueMeta(id uint64, p []byte, flags uint8, gso uint16) {
 		limit = maxSuper
 	}
 	if len(p) == 0 || len(p) > limit {
-		s.e.m.drop(dropInvalidSize)
+		s.drop(dropInvalidSize)
 		return
 	}
 	select {
 	case <-s.ctx.Done():
-		s.e.m.drop(dropCancelledSession)
+		s.drop(dropCancelledSession)
 		return
 	default:
 	}
 	for {
 		old := s.qbytes.Load()
 		next := old + int64(len(p))
-		if c := int64(s.e.cfg.QueueBytes); c > 0 && next > c {
-			s.e.m.drop(dropQueueBytes)
+		if c := int64(s.byteBudget()); c > 0 && next > c {
+			s.drop(dropQueueBytes)
 			return
 		}
 		if s.qbytes.CompareAndSwap(old, next) {
@@ -466,7 +530,7 @@ func (s *session) enqueueMeta(id uint64, p []byte, flags uint8, gso uint16) {
 	case s.q <- v:
 	default:
 		s.qbytes.Add(-int64(len(p)))
-		s.e.m.drop(dropQueuePackets)
+		s.drop(dropQueuePackets)
 	}
 }
 func (s *session) ingress(a *net.UDPAddr, p []byte) {
@@ -476,7 +540,7 @@ func (s *session) ingress(a *net.UDPAddr, p []byte) {
 	if !ok {
 		if len(s.flows) >= maxFlows {
 			s.mu.Unlock()
-			s.e.m.drop(dropFlowLimit)
+			s.drop(dropFlowLimit)
 			return
 		}
 		s.next++
@@ -490,6 +554,9 @@ func (s *session) ingress(a *net.UDPAddr, p []byte) {
 	s.enqueue(id, p)
 }
 func (s *session) deliver(id uint64, p []byte) error {
+	if s.e.cfg.SplitUDP && datagramIP(p) != s.dgram {
+		return errors.New("wrong transport lane")
+	}
 	if s.e.tun != nil {
 		if id != tunFlow || !s.e.sourceAllowed(p) {
 			s.e.m.Spoofed.Add(1)
@@ -497,7 +564,7 @@ func (s *session) deliver(id uint64, p []byte) error {
 		}
 		_, err := s.e.tun.Write(p)
 		if err != nil {
-			s.e.m.drop(dropTUNWrite)
+			s.drop(dropTUNWrite)
 		}
 		return nil
 	}
@@ -509,7 +576,7 @@ func (s *session) deliver(id uint64, p []byte) error {
 		}
 		s.mu.Unlock()
 		if f == nil {
-			s.e.m.drop(dropUnknownFlow)
+			s.drop(dropUnknownFlow)
 			return nil
 		}
 		s.e.udp.SetWriteDeadline(time.Now().Add(time.Second))
@@ -519,7 +586,7 @@ func (s *session) deliver(id uint64, p []byte) error {
 	if f == nil {
 		if len(s.flows) >= maxFlows {
 			s.mu.Unlock()
-			s.e.m.drop(dropFlowLimit)
+			s.drop(dropFlowLimit)
 			return nil
 		}
 		a, err := net.ResolveUDPAddr("udp", s.e.cfg.UDP)
@@ -613,7 +680,7 @@ func (s *session) writeLoop() {
 		case p := <-s.q:
 			p = s.took(p)
 			if time.Since(p.at) > time.Second {
-				s.e.m.drop(dropQueueExpired)
+				s.drop(dropQueueExpired)
 				continue
 			}
 			pad := 0
@@ -640,9 +707,13 @@ func (s *session) writeLoop() {
 				}
 			}
 			s.ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if s.ws.WriteMessage(websocket.BinaryMessage, b) != nil {
+			started := time.Now()
+			err := s.ws.WriteMessage(websocket.BinaryMessage, b)
+			s.recordWrite(time.Since(started))
+			if err != nil {
 				return
 			}
+			s.laneMetrics().sent.Add(sent)
 			s.e.m.Messages.Add(1)
 			s.e.m.Sent.Add(sent)
 			s.e.m.Padding.Add(uint64(pad))
@@ -664,7 +735,7 @@ func (s *session) batch(b []byte, first packet) ([]byte, uint64) {
 		case p := <-s.q:
 			p = s.took(p)
 			if time.Since(p.at) > time.Second {
-				s.e.m.drop(dropQueueExpired)
+				s.drop(dropQueueExpired)
 				continue
 			}
 			b = appendEntry(b, p.id, p.data)
@@ -690,7 +761,7 @@ func (s *session) batchOffload(b []byte, first packet) ([]byte, uint64) {
 		case p := <-s.q:
 			p = s.took(p)
 			if time.Since(p.at) > time.Second {
-				s.e.m.drop(dropQueueExpired)
+				s.drop(dropQueueExpired)
 				continue
 			}
 			b = appendOffload(b, p)
@@ -718,10 +789,11 @@ func (s *session) run() {
 		s.mu.Unlock()
 		s.wg.Wait()
 		s.e.mu.Lock()
-		if s.e.current == s {
-			s.e.current = nil
-			s.e.m.Connected.Store(0)
+		slot := s.e.slot(s.dgram)
+		if *slot == s {
+			*slot = nil
 		}
+		s.e.readiness()
 		s.e.mu.Unlock()
 		close(s.finished)
 	}()
@@ -748,6 +820,7 @@ func (s *session) run() {
 		if s.e.cfg.Offload {
 			if len(b) < 2 || b[1] != offloadType || decodeOffload(b, func(f uint8, g uint16, p []byte) error {
 				s.e.m.Received.Add(1)
+				s.laneMetrics().received.Add(1)
 				return s.deliverOffload(f, g, p)
 			}) != nil {
 				return
@@ -757,6 +830,7 @@ func (s *session) run() {
 		if s.e.cfg.Batch && len(b) > 1 && b[1] == batchType {
 			if decodeBatch(b, func(id uint64, p []byte) error {
 				s.e.m.Received.Add(1)
+				s.laneMetrics().received.Add(1)
 				return s.deliver(id, p)
 			}) != nil {
 				return
@@ -771,6 +845,7 @@ func (s *session) run() {
 			return
 		}
 		s.e.m.Received.Add(1)
+		s.laneMetrics().received.Add(1)
 	}
 }
 func (e *engine) handler(ctx context.Context) http.Handler {
@@ -784,24 +859,33 @@ func (e *engine) handler(ctx context.Context) http.Handler {
 			w.Write([]byte("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Welcome</title><h1>Welcome</h1><p>This site is online.</p></html>"))
 			return
 		}
-		// A placeholder reserves the sole slot during upgrade; unauthenticated requests never allocate sessions.
+		dgram, headers, err := e.negotiate(r)
+		if err != nil {
+			http.Error(w, "transport mode mismatch", http.StatusConflict)
+			return
+		}
+		// Hold the specific lane across Upgrade and reservation: no slot race.
 		e.mu.Lock()
-		if e.current != nil {
+		slot := e.slot(dgram)
+		if *slot != nil {
 			e.mu.Unlock()
 			http.Error(w, "unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		hold := &session{}
-		e.current = hold
+		*slot = hold
 		e.mu.Unlock()
-		ws, err := up.Upgrade(w, r, nil)
-		e.mu.Lock()
-		e.current = nil
-		e.mu.Unlock()
+		ws, err := up.Upgrade(w, r, headers)
 		if err != nil {
+			e.mu.Lock()
+			if *e.slot(dgram) == hold {
+				*e.slot(dgram) = nil
+			}
+			e.readiness()
+			e.mu.Unlock()
 			return
 		}
-		s := e.reserve(ws, ctx)
+		s := e.reserveLane(ws, ctx, dgram, hold)
 		if s == nil {
 			ws.Close()
 			return
@@ -858,17 +942,37 @@ func (e *engine) serve(ctx context.Context, l net.Listener, t *tls.Config) error
 	return err
 }
 func (e *engine) dial(ctx context.Context, t *tls.Config) error {
+	if !e.cfg.SplitUDP {
+		return e.dialLane(ctx, t, false)
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); e.dialLane(ctx, t, true) }()
+	err := e.dialLane(ctx, t, false)
+	wg.Wait()
+	return err
+}
+func (e *engine) dialLane(ctx context.Context, t *tls.Config, dgram bool) error {
 	delay := time.Second
 	for ctx.Err() == nil {
 		started := time.Now()
 		nd := &net.Dialer{Timeout: 10 * time.Second, Control: lowatControl(e.cfg.NotSentLowat)}
 		d := websocket.Dialer{TLSClientConfig: t, HandshakeTimeout: 10 * time.Second, EnableCompression: false, Proxy: nil, NetDialContext: nd.DialContext}
-		ws, res, err := d.DialContext(ctx, e.cfg.URL, http.Header{"Authorization": []string{"Bearer " + e.cfg.Token}})
+		headers := http.Header{"Authorization": []string{"Bearer " + e.cfg.Token}}
+		if e.cfg.SplitUDP {
+			headers.Set(modeHeader, splitMode)
+			headers.Set(laneHeader, laneName(dgram))
+		}
+		ws, res, err := d.DialContext(ctx, e.cfg.URL, headers)
+		if err == nil && e.cfg.SplitUDP && (res == nil || res.Header.Get(modeHeader) != splitMode || res.Header.Get(laneHeader) != laneName(dgram)) {
+			ws.Close()
+			err = errors.New("peer did not confirm split transport")
+		}
 		if res != nil && res.Body != nil {
 			res.Body.Close()
 		}
 		if err == nil {
-			s := e.reserve(ws, ctx)
+			s := e.reserveLane(ws, ctx, dgram, nil)
 			if s != nil {
 				s.run()
 			} else {
@@ -917,11 +1021,17 @@ func (e *engine) run(parent context.Context) error {
 			e.tun.Close()
 		}
 		e.mu.Lock()
-		s := e.current
+		ss := []*session{e.current, e.datagram}
 		e.mu.Unlock()
-		if s != nil && s.cancel != nil {
-			s.cancel()
-			<-s.finished
+		for _, s := range ss {
+			if s != nil && s.cancel != nil {
+				s.cancel()
+			}
+		}
+		for _, s := range ss {
+			if s != nil && s.cancel != nil {
+				<-s.finished
+			}
 		}
 		workers.Wait()
 	}()
@@ -948,14 +1058,11 @@ func (e *engine) run(parent context.Context) error {
 					}
 					continue
 				}
-				e.mu.Lock()
-				s := e.current
-				if s != nil && s.q != nil && n <= maxPayload {
-					s.enqueue(tunFlow, b[:n])
+				if n <= maxPayload {
+					e.enqueueIP(b[:n], 0, 0)
 				} else {
 					e.m.drop(dropNoSessionOrOversize)
 				}
-				e.mu.Unlock()
 			}
 		}()
 	} else if e.cfg.Role == "ingress" {
@@ -995,7 +1102,7 @@ func (e *engine) run(parent context.Context) error {
 				case <-ctx.Done():
 					return
 				case <-tick.C:
-					b, _ := json.Marshal(e.m.snapshot())
+					b, _ := json.Marshal(e.snapshot())
 					tmp := e.cfg.Stats + ".part"
 					if os.WriteFile(tmp, b, 0600) == nil {
 						os.Rename(tmp, e.cfg.Stats)
@@ -1018,6 +1125,7 @@ func main() {
 	file := flag.String("config", "", "root-owned JSON configuration")
 	show := flag.Bool("version", false, "show version")
 	check := flag.Bool("check", false, "validate without opening sockets")
+	split := flag.Bool("split-udp", false, "experimental separate TCP and datagram WSS lanes (both peers required)")
 	flag.Parse()
 	if *show {
 		fmt.Println(version)
@@ -1044,6 +1152,7 @@ func main() {
 	if d.Decode(&c) != nil || d.Decode(new(interface{})) != io.EOF {
 		log.Fatal("invalid configuration")
 	}
+	c.SplitUDP = *split
 	if err = c.validate(); err != nil {
 		log.Fatal(err)
 	}

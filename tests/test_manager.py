@@ -181,3 +181,53 @@ class ManagerTests(unittest.TestCase):
         self.assertIsNone(M.pointer())
         self.assertFalse((M.ROOT/'releases'/version).exists())
         self.assertFalse(M.WRAPPER.exists());self.assertFalse(M.UNIT.exists())
+
+class SplitProfileTests(unittest.TestCase):
+    setUp = ManagerTests.setUp
+    version = ManagerTests.version
+    def make_instance(self):
+        d=M.ETC/'main';d.mkdir(mode=0o700)
+        M.atomic_text(d/'link.json',json.dumps(dict(schema=1,local='10.254.253.1/30',peer='10.254.253.2',unrelated='keep')))
+        M.atomic_text(d/'config.json','{"token":"PRIVATE_UNCHANGED"}')
+        v=self.version('v0.1.0-preview.3');(v/'service_run.py').write_text('SPLIT_UDP_SUPPORT = 1\n')
+        M.set_pointer('current',v)
+        return d,v
+
+    def test_profile_is_metadata_only_no_restart(self):
+        d,v=self.make_instance();original=(d/'config.json').read_bytes();old=(d/'link.json').read_bytes()
+        with patch.object(M,'run') as run,patch.object(M,'service_action') as action:
+            M.set_profile('main',True)
+            self.assertEqual(run.call_args.args[0],[str(v/'dv-tunnel'),'--config',str(d/'config.json'),'--check','--split-udp'])
+            action.assert_not_called()
+        self.assertEqual((d/'config.json').read_bytes(),original)
+        self.assertEqual((d/'link.previous.json').read_bytes(),old)
+        link=json.loads((d/'link.json').read_text());self.assertTrue(link['split_udp']);self.assertEqual(link['unrelated'],'keep')
+        self.assertEqual((d/'link.json').stat().st_mode&0o777,0o600)
+
+    def test_rollback_rejects_old_runner_before_pointer_change(self):
+        d,v=self.make_instance();link=json.loads((d/'link.json').read_text());link['split_udp']=True;M.atomic_text(d/'link.json',json.dumps(link))
+        old=self.version('v0.1.0-preview.2');(old/'service_run.py').write_text('# old runner\n')
+        with patch.object(M,'run') as run:
+            with self.assertRaisesRegex(M.SafeError,'cannot honor'):M.validate_configs(old)
+            run.assert_not_called()
+        self.assertEqual(M.pointer(),v)
+
+    def test_profile_failure_leaves_files_unchanged(self):
+        d,v=self.make_instance();original=(d/'link.json').read_bytes()
+        with patch.object(M,'run',side_effect=M.SafeError('invalid feature')):
+            with self.assertRaises(M.SafeError):M.set_profile('main',True)
+        self.assertEqual((d/'link.json').read_bytes(),original)
+        self.assertFalse((d/'link.previous.json').exists())
+
+    def test_single_stream_recovery_without_old_runner_support(self):
+        d,v=self.make_instance();link=json.loads((d/'link.json').read_text());link['split_udp']=True;M.atomic_text(d/'link.json',json.dumps(link))
+        with patch.object(M,'run') as run:
+            M.set_profile('main',False)
+            self.assertNotIn('--split-udp',run.call_args.args[0])
+        self.assertFalse(json.loads((d/'link.json').read_text())['split_udp'])
+
+    def test_profile_rejects_nonboolean_and_symlink(self):
+        d,v=self.make_instance()
+        with self.assertRaises(M.SafeError):M.split_args(v,{'split_udp':'false'})
+        p=d/'link.json';p.unlink();p.symlink_to(d/'config.json')
+        with self.assertRaises(M.SafeError):M.set_profile('main',True)
