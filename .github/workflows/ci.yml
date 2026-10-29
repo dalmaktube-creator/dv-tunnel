@@ -1,0 +1,25 @@
+name: standalone-checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+      - name: Format, vet, race and build
+        run: |
+          test -z "$(gofmt -l cmd)"
+          go vet ./...
+          go test -race ./...
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/dv-tunnel ./cmd/dv-tunnel
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o dist/dv-tunnel-arm64 ./cmd/dv-tunnel
+      - name: Generator and acceptance harness checks
+        env:
+          DV_CHECK_BINARY: ${{ github.workspace }}/dist/dv-tunnel
+        run: python3 -m unittest discover -s tests -v

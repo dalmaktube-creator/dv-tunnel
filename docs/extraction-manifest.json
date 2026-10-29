@@ -1,0 +1,13 @@
+{
+  "source_repository": "https://github.com/dalmaktube-creator/wg-gaming-panel",
+  "source_commit": "4dd2174356d1df3eb4499615e3d9e508c8b18e71",
+  "extraction": "Core .go files copied byte-for-byte. Module path and generator naming adapted only. No panel code or private configurations.",
+  "core_sha256": {
+    "tools/wgp-webtcp/main.go": "2f22cb4c0ef35f5c77a1293dc57230735a4f3096c92d155303a55432bb57f4a5",
+    "tools/wgp-webtcp/offload.go": "4a11f1a6e358472f3dca0740faadc963d4226b0b1b7d211ab10a25c515ad2289",
+    "tools/wgp-webtcp/main_test.go": "6df945db3575855e9860305221fad4d20a71efbeb6f0ef6f6513444488fb33b7",
+    "tools/wgp-webtcp/tun_linux.go": "499a9edb5f186c785c279d46b71a2a5144f91df065974da394e5e0a4393ecf99",
+    "tools/wgp-webtcp/tun_other.go": "2af766bf2655b30de66d2091fd6590b8d354b6a6c5dee0cf5846270ee76bf240",
+    "tools/wgp-webtcp/queue_test.go": "4ae9c0cbc802dad5f4bd524b1b098b91039902bd929a3485746be77e47da32dd"
+  }
+}

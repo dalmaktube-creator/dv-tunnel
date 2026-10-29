@@ -1,0 +1,9 @@
+/dist/
+/private-*/
+/results/
+__pycache__/
+*.pyc
+config.json
+stats.json
+*.pem
+*.key
