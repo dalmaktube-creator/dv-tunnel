@@ -94,6 +94,18 @@ func (c config) packetQueueSize() int {
 	return c.QueuePackets
 }
 
+// Opt-in packet-cap experiment; byte, age and write limits remain untouched.
+func (c *config) overrideQueuePackets(n int) error {
+	if n == 0 {
+		return nil
+	}
+	if !c.SplitUDP || n < 2 || n > 256 {
+		return errors.New("queue override requires split-udp and 2..256 total packets")
+	}
+	c.QueuePackets = n
+	return nil
+}
+
 func validIfName(n string) bool {
 	if len(n) == 0 || len(n) > 15 {
 		return false
@@ -1145,6 +1157,7 @@ func main() {
 	show := flag.Bool("version", false, "show version")
 	check := flag.Bool("check", false, "validate without opening sockets")
 	split := flag.Bool("split-udp", false, "experimental separate TCP and datagram WSS lanes (both peers required)")
+	queue := flag.Int("queue-packets", 0, "opt-in split total packet cap 2..256; zero preserves private configuration")
 	flag.Parse()
 	if *show {
 		fmt.Println(version)
@@ -1172,6 +1185,9 @@ func main() {
 		log.Fatal("invalid configuration")
 	}
 	c.SplitUDP = *split
+	if err = c.overrideQueuePackets(*queue); err != nil {
+		log.Fatal(err)
+	}
 	if err = c.validate(); err != nil {
 		log.Fatal(err)
 	}

@@ -12,6 +12,7 @@
   },
   "subsequent_changes": [
     "preview.3: opt-in independently negotiated split-udp TCP connections, per-lane bounded queues/stats, lifecycle and test coverage; main.go and offload.go changed, split.go/split_test.go added. No third-party reference implementation copied.",
-    "preview.4: datagram lane gets one scheduler yield and one nonblocking retry on packet-cap pressure; unchanged queue limits and byte/age budgets, added retry counters/tests. No reference implementation copied."
+    "preview.4: datagram lane gets one scheduler yield and one nonblocking retry on packet-cap pressure; unchanged queue limits and byte/age budgets, added retry counters/tests. No reference implementation copied.",
+    "preview.5: explicit split-only CLI queue-packets override, nonsecret manager metadata with target-runner guards, unchanged defaults/byte/age/write limits, and queue-cap preflight in the focused checker. No reference implementation copied."
   ]
 }

@@ -141,6 +141,18 @@ class FieldPairTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 preflight([], [], "listen")
 
+    @unittest.skipUnless(os.environ.get('DV_CHECK_BINARY'),'compiled core required')
+    def test_split_queue_cli_override_validates_without_rewriting_config(self):
+        binary=os.environ['DV_CHECK_BINARY']
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'pair';F.generate(root,'198.51.100.10','10.254.253.0/30',variant='offload-lowlat')
+            p=root/'node-a/config.json';before=p.read_bytes()
+            for n,split,expected in [(256,True,0),(64,True,0),(1,True,1),(-1,True,1),(257,True,1),(256,False,1),(0,False,0)]:
+                args=[binary,'--config',str(p),'--check','--queue-packets',str(n)]+(['--split-udp'] if split else [])
+                result=subprocess.run(args,capture_output=True,timeout=10)
+                self.assertEqual(result.returncode==0,expected==0,(n,split,result.stderr))
+                self.assertEqual(p.read_bytes(),before)
+
 
 if __name__ == "__main__":
     unittest.main()

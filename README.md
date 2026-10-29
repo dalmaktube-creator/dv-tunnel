@@ -71,8 +71,9 @@ A: `ping -I wft0 10.254.253.2`; B: `ping -I wft0 10.254.253.1`.
 A live process is not proof of a connected TLS session: inspect fresh `stats.json`
 locally for `connected: 1`. Never share `config.json` or private PEMs/tokens.
 
-`--queue-packets 128` is experimental opt-in. Omitted/0 keeps 64; accepted explicit
-bounds are 1..256. Byte and one-second age limits remain independent. A bigger
+The field-pair generator `--queue-packets 128` is experimental opt-in.
+Omitted/0 keeps the original 64; accepted generator bounds are 1..256.
+The preview.5 core override is separate: split-only, 2..256 total slots. Byte and one-second age limits remain independent. A bigger
 buffer is not a guarantee of better latency.
 
 ## Acceptance and integration
@@ -93,3 +94,7 @@ an open-source license; see LICENSE.
 connections, with aggregate queue budgets divided between them. Default behavior
 is unchanged; both peers must explicitly opt in. [TCP-only source review](docs/TCP-REVIEW.md)
 records references and licensing boundaries. Not yet a WAN-quality or capacity pass.
+
+## Opt-in packet burst trial (preview.5)
+
+The default queue remains unchanged. An explicit, metadata-only `dv-tunnel queue NAME --packets 256` selects 128 slots per split lane, still subject to existing byte/age/write limits; a separate explicit restart applies it. `queue NAME --default` clears the override. This is a finite burst-headroom experiment, not a capacity or lossless guarantee. See [controlled queue trial](docs/QUEUE-BURST-TRIAL.md) for verification, byte caps, latency caveats and safe rollback.

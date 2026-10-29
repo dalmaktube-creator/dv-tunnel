@@ -264,7 +264,14 @@ def make_handler(h):
         def handle(self):
             self.request.settimeout(15);o=self.server.owner
             obj=h.recv_json(self.request);op=obj.get('op')
-            if op=='ping':h.send_json(self.request,dict(ok=True,suite=o.suite,version=o.initial['stats'].get('version')));return
+            if op=='ping':
+                # Services starts its listener thread during construction; an
+                # early probe must not turn that tiny setup window into a
+                # permanent handler failure or claim the wrong experiment.
+                initial=getattr(o,'initial',None);suite=getattr(o,'suite',None)
+                if initial is None or suite is None:
+                    h.send_json(self.request,dict(ok=False,suite='initializing'));return
+                h.send_json(self.request,dict(ok=True,suite=suite,version=initial['stats'].get('version'),packet_limits={k:v.get('packet_limit') for k,v in initial['stats'].get('lanes',{}).items()}));return
             if op=='transfer':
                 data=h.read_exact(self.request,h.SIZE)
                 if data!=h.PAYLOAD:raise ValueError('Upload integrity failure')
@@ -360,6 +367,8 @@ def run(args,live=None,helper=None,phases=None,ports=None):
         report['before']=live.inspect_link(args)
         expected=getattr(args,'expect_version',None)
         if expected and report['before']['stats'].get('version')!=expected:raise RuntimeError('Installed carrier version does not match experiment')
+        expected_packets=getattr(args,'expect_lane_packets',None)
+        if expected_packets is not None and (not 1<=expected_packets<=128 or any(report['before']['stats'].get('lanes',{}).get(k,{}).get('packet_limit')!=expected_packets for k in ('tcp','udp'))):raise RuntimeError('Local lane packet cap does not match experiment')
         if diagnostic:observer=QueueDiagnostics(report['before']['main_pid'],args.iface)
         guard=h.HostGuard();monitor=Monitor(live,args,guard.stop)
         h.Handler=make_handler(h)
@@ -381,6 +390,7 @@ def run(args,live=None,helper=None,phases=None,ports=None):
             greeting=rpc(h,args.peer,tp,dict(op='ping'))
             if greeting.get('suite')!=report['suite']:raise RuntimeError('Both endpoints must run the same checker mode')
             if expected and greeting.get('version')!=expected:raise RuntimeError('Peer carrier version does not match experiment')
+            if expected_packets is not None and any(greeting.get('packet_limits',{}).get(k)!=expected_packets for k in ('tcp','udp')):raise RuntimeError('Peer lane packet cap does not match experiment')
             for spec in specs:
                 print('PHASE',spec['id'],'seconds',spec['seconds'],'UDP Mbps per initiator',spec['pps']*.0096,flush=True)
                 before=live.inspect_link(args)
@@ -432,7 +442,7 @@ def run(args,live=None,helper=None,phases=None,ports=None):
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('role',choices=['server','client'])
-    ap.add_argument('--queue-diagnostic',action='store_true',help='One 30s 4.8Mbps phase with read-only carrier-owned TCP and TUN counters; no tuning or carrier changes');ap.add_argument('--expect-version');ap.add_argument('--instance',default='main');ap.add_argument('--iface',default='wft0')
+    ap.add_argument('--queue-diagnostic',action='store_true',help='One 30s 4.8Mbps phase with read-only carrier-owned TCP and TUN counters; no tuning or carrier changes');ap.add_argument('--expect-version');ap.add_argument('--expect-lane-packets',type=int);ap.add_argument('--instance',default='main');ap.add_argument('--iface',default='wft0')
     ap.add_argument('--local');ap.add_argument('--peer');ap.add_argument('--output')
     args=ap.parse_args();args.output=args.output or ('/root/dv-queue-diag-results' if args.queue_diagnostic else '/root/dv-soak-results');args.local=args.local or ('10.254.253.2' if args.role=='server' else '10.254.253.1');args.peer=args.peer or ('10.254.253.1' if args.role=='server' else '10.254.253.2')
     signal.signal(signal.SIGTERM,lambda s,f:(_ for _ in ()).throw(KeyboardInterrupt()))

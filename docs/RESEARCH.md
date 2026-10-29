@@ -148,3 +148,35 @@ Original uploaded report.json SHA256:
 Next: QUEUE-DIAGNOSTIC.md. Only the failing load is repeated, with read-only
 carrier-owned TCP/TUN observations. No new runtime release, queue enlargement or
 server mutation is justified yet. No real-server diagnostic result is claimed.
+
+
+## Focused preview.4 queue diagnostic
+
+The 30-second / 4.8 Mbps-per-initiator phase aborted at about 12.64 seconds on
+the client clock. Iran queue drop delta 0; Turkey queue_packets delta 68, all
+in the UDP/ICMP lane. Turkey crossed the existing >=64-drop hard-stop. Neither
+host guard reported the trigger; both PIDs/sessions remained unchanged, both
+endpoint cleanup reports OK, and TUN kernel drop/error counters did not increase
+in samples. Observation errors 0 at both endpoints.
+
+Outer TCP cumulative retransmission deltas per observed FD: Iran fd6 +6 / fd7 +3;
+Turkey fd7 +13 / fd8 +42. FD is not a verified protocol lane label. Max sampled
+socket send queues: Iran 17128/110366 bytes, Turkey 33047/146592 bytes in the same
+FD order. This records retransmission and backlog, not causal attribution of the
+queue-cap drops or a one-to-one count of inner UDP loss. Half-second polling can
+miss shorter stalls. The previous cumulative writer-duration maxima did not
+increase during this run and must not be presented as new write stalls.
+
+Partial UDP unreturned-at-stop counts: Iran initiated 480, Turkey initiated 91;
+final drain did not finish, so missing_by_deadline is null. Four TCP transactions
+completed before abort; subsequent EOF errors and the client peer-service
+ConnectionRefusedError are not proof of TCP payload corruption/carrier failure.
+No higher rate or full-duration capacity acceptance was obtained.
+
+Original report.json SHA256:
+- iran: 0328c9793710bfb06aa628960eb191a58030ce2d84c1c1b1423d551ca7548922
+- turkey: 6b0e15c2453638b3ffde2541ca0483af63fad8a6dce0cc65162a156f86eacb1c
+
+Next: QUEUE-BURST-TRIAL.md. An explicit preview.5 packet-cap trial keeps private
+configuration bytes and byte/age/write limits unchanged. No operator result or
+performance fix is claimed before field acceptance.

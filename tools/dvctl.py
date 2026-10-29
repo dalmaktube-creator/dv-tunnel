@@ -229,12 +229,21 @@ def active(name):
 def split_args(release,link):
     value=link.get('split_udp',False)
     if not isinstance(value,bool):raise SafeError('split_udp metadata must be boolean')
-    if value:
+    override=link.get('queue_packets_override',0)
+    if not isinstance(override,int) or isinstance(override,bool) or override not in (0,*range(2,257)):
+        raise SafeError('Queue override must be 0 or 2..256 total packets')
+    if override and not value:raise SafeError('Clear queue override with queue NAME --default before selecting single-stream')
+    args=[]
+    if value or override:
         runner=release/'service_run.py'
-        if not runner.is_file() or 'SPLIT_UDP_SUPPORT = 1' not in runner.read_text().splitlines():
+        lines=runner.read_text().splitlines() if runner.is_file() else []
+        if value and 'SPLIT_UDP_SUPPORT = 1' not in lines:
             raise SafeError('Target runtime cannot honor split-udp; switch both peers to single-stream before downgrade')
-        return ['--split-udp']
-    return []
+        if override and 'QUEUE_OVERRIDE_SUPPORT = 1' not in lines:
+            raise SafeError('Target runtime cannot honor queue override; clear it with queue NAME --default and restart before downgrade')
+    if value:args.append('--split-udp')
+    if override:args.extend(['--queue-packets',str(override)])
+    return args
 
 
 def validate_configs(release):
@@ -266,6 +275,28 @@ def set_profile(name,split):
     atomic_text(p,json.dumps(link,indent=2)+'\n')
     print('Selected',('split-udp-v1' if split else 'single-stream'),'for',name)
     print('No restart performed. Set matching profiles on BOTH peers, then explicitly restart each instance.')
+
+
+def set_queue(name,packets):
+    name=instance_name(name)
+    if not isinstance(packets,int) or isinstance(packets,bool) or packets not in (0,*range(2,257)):raise SafeError('Use --default or --packets 2..256 (TOTAL across both lanes)')
+    if name not in instances():raise SafeError('Unknown managed instance')
+    release=pointer()
+    if not release:raise SafeError('Install DV Tunnel first')
+    p=ETC/name/'link.json';cfg=ETC/name/'config.json'
+    for f in (p,cfg):
+        if f.is_symlink() or f.stat().st_uid!=os.geteuid() or f.stat().st_mode & 0o077:raise SafeError('Refusing unsafe instance files')
+    old=p.read_text();link=json.loads(old)
+    if packets and link.get('split_udp') is not True:raise SafeError('Queue override requires the selected split-udp profile')
+    if packets:link['queue_packets_override']=packets
+    else:link.pop('queue_packets_override',None)
+    run([str(release/'dv-tunnel'),'--config',str(cfg),'--check']+split_args(release,link))
+    if link==json.loads(old):
+        print('Queue setting already selected; no restart performed');return
+    atomic_text(ETC/name/'link.queue.previous.json',old)
+    atomic_text(p,json.dumps(link,indent=2)+'\n')
+    print('Selected total queue packets:',packets or 'private configuration default','for',name)
+    print('Byte/age/write limits unchanged. No restart performed; explicitly restart only this instance.')
 
 
 def require_managed_files():
@@ -602,7 +633,7 @@ def menu():
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('command',nargs='?',default='menu',choices=['menu','install','update','rollback','check-update','status','import','start','stop','restart','profile'])
+    ap.add_argument('command',nargs='?',default='menu',choices=['menu','install','update','rollback','check-update','status','import','start','stop','restart','profile','queue'])
     ap.add_argument('name',nargs='?')
     ap.add_argument('--version',dest='version')
     ap.add_argument('--restart',action='store_true',help='explicitly allow restarting active managed instances')
@@ -610,6 +641,9 @@ def main():
     profiles=ap.add_mutually_exclusive_group()
     profiles.add_argument('--split-udp',action='store_true')
     profiles.add_argument('--single-stream',action='store_true')
+    queues=ap.add_mutually_exclusive_group()
+    queues.add_argument('--packets',type=int)
+    queues.add_argument('--default',dest='queue_default',action='store_true')
     ap.add_argument('--field-dir');ap.add_argument('--local');ap.add_argument('--peer')
     args=ap.parse_args()
     if os.geteuid()!=0:ap.exit(1,'Run with sudo/root. No change was made.\n')
@@ -624,6 +658,9 @@ def main():
                     target=pointer('previous')
                     if not target:raise SafeError('No previous local version')
                     activate(target,args.restart);print('Rolled back to',target.name)
+                elif args.command=='queue':
+                    if not args.name or (args.packets is None and not args.queue_default):raise SafeError('queue needs NAME and --packets N or --default')
+                    set_queue(args.name,0 if args.queue_default else args.packets)
                 elif args.command=='profile':
                     if not args.name or not (args.split_udp or args.single_stream):raise SafeError('profile needs NAME and --split-udp or --single-stream')
                     set_profile(args.name,args.split_udp)

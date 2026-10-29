@@ -160,10 +160,12 @@ class SoakTests(unittest.TestCase):
             t=threading.Thread(target=lambda:values.append(S.run(server,live=l,helper=h,phases=phases,ports=tuple(ports))),daemon=True);t.start()
             deadline=time.monotonic()+3
             while True:
-                try:S.rpc(h,'127.0.0.1',ports[0],dict(op='ping'));break
-                except OSError:
-                    if time.monotonic()>deadline:self.fail('Server did not start')
-                    time.sleep(.02)
+                try:
+                    greeting=S.rpc(h,'127.0.0.1',ports[0],dict(op='ping'))
+                    if greeting.get('suite')==('dv-queue-diagnostic-v1' if diagnostic else 'dv-soak-v2'):break
+                except OSError:pass
+                if time.monotonic()>deadline:self.fail('Server did not start')
+                time.sleep(.02)
             result=S.run(client,live=l,helper=h,phases=phases,ports=(ports[2],ports[3],ports[0],ports[1]))
             t.join(15);self.assertFalse(t.is_alive());self.assertEqual(values,[0]);self.assertEqual(result,0)
             d=json.loads((Path(tmp)/'client/latest-client.json').read_text())
@@ -242,3 +244,17 @@ class SoakTests(unittest.TestCase):
         obj=S.QueueDiagnostics.__new__(S.QueueDiagnostics);obj.pid=124;obj.identity=(123,555)
         with patch.object(S,'process_identity',return_value=(123,556)),patch.object(S.subprocess,'run') as run:
             result=obj.sample();run.assert_not_called();self.assertEqual(result['error_type'],'RuntimeError')
+
+    def test_wrong_local_expected_packet_cap_opens_no_test_sockets(self):
+        l,h=helper();before=dict(main_pid=123,stats=dict(version='v0.1.0-preview.5',connected=1,sessions=2,lanes={'tcp':{'packet_limit':32},'udp':{'packet_limit':32}}))
+        a=argparse.Namespace(role='client',instance='main',iface='wft0',queue_diagnostic=True,expect_version='v0.1.0-preview.5',expect_lane_packets=128,output='unused')
+        with patch.object(l,'inspect_link',return_value=before),patch.object(l,'write_report') as write,patch.object(h,'Services') as services,patch.object(S,'QueueDiagnostics') as obs:
+            self.assertEqual(S.run(a,live=l,helper=h),1);services.assert_not_called();obs.assert_not_called()
+            self.assertIn('Local lane packet cap',write.call_args.args[2]['error'])
+
+    def test_wrong_peer_expected_packet_cap_rejected_before_load(self):
+        l,h=helper();before=dict(main_pid=123,stats=dict(version='v0.1.0-preview.5',connected=1,sessions=2,drops=0,spoofed_drops=0,tx_datagrams=0,rx_datagrams=0,drop_reasons={},transport_profile='split-udp-v1',lanes={'tcp':{'packet_limit':128},'udp':{'packet_limit':128}}))
+        a=argparse.Namespace(role='client',local='127.0.0.1',peer='127.0.0.1',instance='main',iface='wft0',queue_diagnostic=True,expect_version='v0.1.0-preview.5',expect_lane_packets=128,output='unused')
+        with patch.object(l,'inspect_link',return_value=before),patch.object(l,'stats',return_value=before['stats']),patch.object(l,'write_report') as write,patch.object(S,'QueueDiagnostics'),patch.object(h,'Services'),patch.object(S,'rpc',return_value={'suite':'dv-queue-diagnostic-v1','version':'v0.1.0-preview.5','packet_limits':{'tcp':32,'udp':32}}),patch.object(S,'run_phase') as phase:
+            self.assertEqual(S.run(a,live=l,helper=h),1);phase.assert_not_called()
+            self.assertIn('Peer lane packet cap',write.call_args.args[2]['error'])

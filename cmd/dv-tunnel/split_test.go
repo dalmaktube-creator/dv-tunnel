@@ -493,3 +493,43 @@ func TestDatagramQueueYieldDoesNotWaitForBlockedWriter(t *testing.T) {
 		t.Fatal("unexpected retry accounting")
 	}
 }
+
+func TestExplicitQueueOverridePreservesOtherBudgets(t *testing.T) {
+	c := config{SplitUDP: true, QueuePackets: 64, QueueBytes: 262144, NotSentLowat: 131072, Offload: true}
+	if err := c.overrideQueuePackets(256); err != nil {
+		t.Fatal(err)
+	}
+	if c.QueuePackets != 256 || c.QueueBytes != 262144 || c.NotSentLowat != 131072 || !c.Offload {
+		t.Fatal("unrelated queue limits changed")
+	}
+	e := &engine{cfg: c}
+	a := e.reserveLane(nil, context.Background(), false, nil)
+	b := e.reserveLane(nil, context.Background(), true, nil)
+	defer a.cancel()
+	defer b.cancel()
+	if cap(a.q) != 128 || cap(b.q) != 128 || a.byteBudget() != 131072 || b.byteBudget() != 131072 {
+		t.Fatal("not bounded at requested split caps")
+	}
+	for i := 0; i < 200; i++ {
+		e.enqueueIP(makeUDPPacketForQueueTest(), 0, 0)
+	}
+	if b.qbytes.Load() > 131072 || len(b.q) > 128 || e.m.DropReasons[dropQueueBytes].Load() == 0 {
+		t.Fatal("byte cap bypassed by larger packet cap")
+	}
+}
+func makeUDPPacketForQueueTest() []byte { p := make([]byte, 1228); p[0] = 0x45; p[9] = 17; return p }
+func TestQueueOverrideRejectsUnsafeAndKeepsDefault(t *testing.T) {
+	for _, n := range []int{-1, 1, 257} {
+		c := config{SplitUDP: true, QueuePackets: 64}
+		if c.overrideQueuePackets(n) == nil || c.QueuePackets != 64 {
+			t.Fatal("invalid override accepted or mutated config")
+		}
+	}
+	c := config{QueuePackets: 64}
+	if c.overrideQueuePackets(256) == nil {
+		t.Fatal("legacy override accepted")
+	}
+	if err := c.overrideQueuePackets(0); err != nil || c.QueuePackets != 64 {
+		t.Fatal("default changed")
+	}
+}

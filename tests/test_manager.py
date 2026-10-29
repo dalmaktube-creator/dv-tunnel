@@ -231,3 +231,46 @@ class SplitProfileTests(unittest.TestCase):
         with self.assertRaises(M.SafeError):M.split_args(v,{'split_udp':'false'})
         p=d/'link.json';p.unlink();p.symlink_to(d/'config.json')
         with self.assertRaises(M.SafeError):M.set_profile('main',True)
+
+class QueueOverrideTests(SplitProfileTests):
+    def make_queue_instance(self):
+        d,v=self.make_instance();(v/'service_run.py').write_text('SPLIT_UDP_SUPPORT = 1\nQUEUE_OVERRIDE_SUPPORT = 1\n')
+        link=json.loads((d/'link.json').read_text());link['split_udp']=True;M.atomic_text(d/'link.json',json.dumps(link));return d,v
+
+    def test_queue_is_metadata_only_and_no_restart(self):
+        d,v=self.make_queue_instance();private=(d/'config.json').read_bytes();old=(d/'link.json').read_bytes()
+        with patch.object(M,'run') as run,patch.object(M,'service_action') as action:
+            M.set_queue('main',256);action.assert_not_called()
+            self.assertEqual(run.call_args.args[0][-3:],['--split-udp','--queue-packets','256'])
+        self.assertEqual((d/'config.json').read_bytes(),private)
+        self.assertEqual((d/'link.queue.previous.json').read_bytes(),old)
+        self.assertEqual(json.loads((d/'link.json').read_text())['queue_packets_override'],256)
+        self.assertEqual((d/'link.json').stat().st_mode&0o777,0o600)
+        with patch.object(M,'run'):
+            M.set_queue('main',0)
+        self.assertNotIn('queue_packets_override',json.loads((d/'link.json').read_text()))
+        self.assertEqual((d/'config.json').read_bytes(),private)
+
+    def test_queue_failure_is_atomic_and_rollback_refuses_old_runner(self):
+        d,v=self.make_queue_instance();old=(d/'link.json').read_bytes()
+        with patch.object(M,'run',side_effect=M.SafeError('bad runtime')):
+            with self.assertRaises(M.SafeError):M.set_queue('main',256)
+        self.assertEqual((d/'link.json').read_bytes(),old)
+        self.assertFalse((d/'link.queue.previous.json').exists())
+        with patch.object(M,'run'):M.set_queue('main',256)
+        (v/'service_run.py').write_text('SPLIT_UDP_SUPPORT = 1\n')
+        with patch.object(M,'run') as run:
+            with self.assertRaisesRegex(M.SafeError,'cannot honor queue'):M.validate_configs(v)
+            run.assert_not_called()
+        with patch.object(M,'run'):M.set_queue('main',0)
+
+    def test_queue_rejects_invalid_metadata_and_profile_change(self):
+        d,v=self.make_queue_instance()
+        for q in [True,'256',1,-1,257]:
+            with self.assertRaises(M.SafeError):M.split_args(v,dict(split_udp=True,queue_packets_override=q))
+        with patch.object(M,'run'):M.set_queue('main',256)
+        old=(d/'link.json').read_bytes()
+        with self.assertRaisesRegex(M.SafeError,'Clear queue override'):M.set_profile('main',False)
+        self.assertEqual((d/'link.json').read_bytes(),old)
+        p=d/'link.json';p.unlink();p.symlink_to(d/'config.json')
+        with self.assertRaises(M.SafeError):M.set_queue('main',256)
