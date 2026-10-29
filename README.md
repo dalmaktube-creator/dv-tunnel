@@ -13,7 +13,8 @@ Outer TCP head-of-line blocking remains, including for inner UDP/QUIC.
 ## Ubuntu terminal menu and updates
 
 Versioned installation, status, explicit update/restart and local rollback are
-available via `sudo dv-tunnel`. See [installation and update guide](docs/UPDATE.md).
+available via `sudo dv-tunnel`. See [installation and update guide](docs/UPDATE.md)
+and [terminal dashboard](docs/MENU.md) for colors, compact layout and connection states.
 Installing the menu does not import, start, enable or migrate a tunnel. Published
 preview assets must finish building first; root installation trusts this repository
 and GitHub HTTPS/checksums, not an independent code signature.

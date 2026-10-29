@@ -13,9 +13,9 @@ Inspect the downloaded script before running it as root.
 ```bash
 installer="$(mktemp)"
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/dalmaktube-creator/dv-tunnel/v0.1.0-preview.1/tools/dvctl.py \
+  https://raw.githubusercontent.com/dalmaktube-creator/dv-tunnel/v0.1.0-preview.2/tools/dvctl.py \
   -o "$installer" &&
-sudo python3 "$installer" install --version v0.1.0-preview.1
+sudo python3 "$installer" install --version v0.1.0-preview.2
 rm -f "$installer"
 sudo dv-tunnel
 ```

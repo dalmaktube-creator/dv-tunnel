@@ -389,45 +389,180 @@ def service_action(action,name,yes=False):
     print(action, name, 'requested; use status to verify a fresh connected session')
 
 
-def status():
-    current=pointer();previous=pointer('previous')
-    print('DV Tunnel | current:',current.name if current else 'not installed','| previous:',previous.name if previous else 'none')
+class TerminalUI:
+    """Dependency-free SSH UI; no ANSI in pipes, NO_COLOR or dumb terminals."""
+    COLORS={'brand':'1;36','title':'1;37','muted':'90','ok':'1;32',
+            'warn':'1;33','error':'1;31','accent':'1;35','plain':'37'}
+
+    def __init__(self,stream=None,width=None,color=None,unicode=None):
+        self.stream=stream if stream is not None else sys.stdout
+        self.interactive=bool(getattr(self.stream,'isatty',lambda:False)())
+        self.width=max(12,min(78,width if width is not None else shutil.get_terminal_size((80,24)).columns-2))
+        self.inner=self.width-4
+        self.color=(self.interactive and 'NO_COLOR' not in os.environ and os.environ.get('TERM','dumb')!='dumb') if color is None else color
+        encoding=getattr(self.stream,'encoding',None) or 'ascii'
+        try:'╭╮╰╯─│├┤'.encode(encoding);supported=True
+        except (UnicodeError,LookupError):supported=False
+        self.unicode=(self.interactive and supported and os.environ.get('DV_ASCII')!='1') if unicode is None else unicode
+
+    @staticmethod
+    def safe(text):
+        # All labels are ASCII; hostnames/errors cannot inject terminal controls
+        # or double-width glyphs into a carefully measured frame.
+        return ''.join(c for c in str(text) if 32<=ord(c)<=126)
+
+    def paint(self,text,tone='plain'):
+        text=self.safe(text)
+        return '\033['+self.COLORS.get(tone,'37')+'m'+text+'\033[0m' if self.color else text
+
+    def emit(self,text=''):
+        print(text,file=self.stream)
+
+    def edge(self,kind='middle'):
+        a,b,c=({'top':('╭','─','╮'),'middle':('├','─','┤'),'bottom':('╰','─','╯')}[kind]
+               if self.unicode else ('+','-','+'))
+        line=a+b*(self.width-2)+c
+        # Border characters, unlike untrusted text, are emitted verbatim.
+        self.emit('\033[36m'+line+'\033[0m' if self.color else line)
+
+    def line(self,text='',tone='plain'):
+        import textwrap
+        rows=textwrap.wrap(self.safe(text),width=self.inner,replace_whitespace=True,
+                           break_long_words=True,break_on_hyphens=False) or ['']
+        side='│' if self.unicode else '|'
+        border='\033[36m'+side+'\033[0m' if self.color else side
+        for row in rows:self.emit(border+' '+self.paint(row.ljust(self.inner),tone)+' '+border)
+
+    def clear(self):
+        if self.interactive and os.environ.get('TERM','dumb')!='dumb' and not os.environ.get('DV_NO_CLEAR'):
+            self.emit('\033[2J\033[H')
+
+    def note(self,message,tone='muted'):
+        self.emit(self.paint('  '+message,tone))
+
+
+def instance_rows():
+    rows=[]
     for name in instances():
-        connected='unknown/stale'
-        try:
-            p=STATE/name/'stats.json';d=json.loads(p.read_text())
-            if active(name) and 0<=time.time()-p.stat().st_mtime<6:connected=str(d.get('connected','unknown'))
-        except (OSError,ValueError):pass
-        print(name,'active='+str(active(name)),'connected='+connected)
+        running=active(name)
+        state='INACTIVE';tone='muted';drops=None
+        if running:
+            state='STALE / UNKNOWN';tone='warn'
+            try:
+                p=STATE/name/'stats.json';d=json.loads(p.read_text())
+                if 0<=time.time()-p.stat().st_mtime<6:
+                    state='CONNECTED' if d.get('connected')==1 else 'CONNECTING'
+                    tone='ok' if state=='CONNECTED' else 'warn'
+                    value=d.get('drops')
+                    if isinstance(value,int) and not isinstance(value,bool) and value>=0:drops=value
+            except (OSError,ValueError):pass
+        rows.append(dict(name=name,running=running,state=state,tone=tone,drops=drops))
+    return rows
+
+
+def render_dashboard(ui,rows,show_options=True):
+    current=pointer();previous=pointer('previous')
+    connected=sum(r['state']=='CONNECTED' for r in rows)
+    running=sum(r['running'] for r in rows)
+    ui.edge('top')
+    ui.line('D V   T U N N E L','title')
+    ui.line('STANDALONE TRANSPORT  /  PREVIEW','accent')
+    ui.edge()
+    ui.line('Installed  '+(current.name if current else 'not installed'),'brand')
+    ui.line('Rollback   '+(previous.name if previous else 'not available yet'),'muted')
+    ui.line('Node       '+platform.node()+'  /  '+platform.machine(),'muted')
+    ui.edge()
+    ui.line('LINK OVERVIEW','title')
+    ui.line('Managed: '+str(len(rows))+'   Running: '+str(running)+'   WSS connected: '+str(connected),'ok' if connected else 'muted')
+    if not rows:
+        ui.line('No managed tunnels yet. Installing the menu does not start a tunnel.','warn')
+        ui.line('Existing field tests are not imported automatically.','muted')
+    else:
+        for r in rows:
+            text=r['name']+'  |  '+r['state']
+            if r['drops'] is not None:text+='  |  drops '+str(r['drops'])
+            ui.line(text,r['tone'])
+        ui.line('CONNECTED = fresh WSS stats, not full application acceptance.','muted')
+    if show_options:
+        ui.edge()
+        if ui.inner>=58:
+            col=(ui.inner-3)//2
+            ui.line('MONITOR                       MAINTENANCE','accent')
+            ui.line('[1] Status & connections'.ljust(col)+' | [3] Update DV Tunnel')
+            ui.line('[2] Check latest release'.ljust(col)+' | [4] Roll back version')
+            ui.edge();ui.line('TUNNEL CONTROL','accent')
+            ui.line('[5] Start       [6] Stop       [7] Restart','warn')
+        else:
+            ui.line('MONITOR','accent')
+            ui.line('[1] Status & connections');ui.line('[2] Check latest release')
+            ui.edge();ui.line('MAINTENANCE','accent')
+            ui.line('[3] Update DV Tunnel','brand');ui.line('[4] Roll back version')
+            ui.edge();ui.line('TUNNEL CONTROL','accent')
+            ui.line('[5] Start instance','ok');ui.line('[6] Stop instance','warn');ui.line('[7] Restart instance','warn')
+        ui.edge();ui.line('[0] Exit  |  No automatic restarts','muted')
+    ui.edge('bottom')
+
+
+def status():
+    ui=TerminalUI()
+    render_dashboard(ui,instance_rows(),show_options=False)
 
 
 def menu():
+    ui=TerminalUI()
     while True:
-        print('\nDV Tunnel — Preview\n1) Status\n2) Check releases\n3) Update\n4) Roll back\n5) Start instance\n6) Stop instance\n7) Restart instance\n0) Exit')
-        choice=input('> ').strip()
+        ui.clear()
+        rows=instance_rows()
+        render_dashboard(ui,rows)
+        try:choice=input(ui.paint('  Select [0-7] > ','brand')).strip()
+        except (EOFError,KeyboardInterrupt):ui.note('Exited. No tunnel was stopped.');return
+        if choice=='0':ui.note('Exited. Tunnels keep their current state.');return
         try:
-            if choice=='0':return
             if choice=='1':status()
-            elif choice=='2':print('Newest published version (including preview):',latest_version())
+            elif choice=='2':
+                ui.note('Checking published releases...','brand')
+                ui.note('Newest version: '+latest_version(),'ok')
             elif choice in ('3','4'):
                 running=[n for n in instances() if active(n)]
+                confirmed=True
                 if running:
-                    print('This interrupts ONLY these managed tunnels:',', '.join(running))
-                    if input('Type RESTART to continue: ').strip()!='RESTART':continue
-                with lock():
-                    if choice=='3':install(restart=bool(running))
-                    else:
-                        target=pointer('previous')
-                        if not target:raise SafeError('No previous local version')
-                        activate(target,restart=bool(running));print('Rolled back to',target.name)
+                    ui.note('This briefly interrupts ONLY: '+', '.join(running),'warn')
+                    confirmed=input(ui.paint('  Type RESTART to continue > ','warn')).strip()=='RESTART'
+                if not confirmed:ui.note('Cancelled. No change was made.','muted')
+                else:
+                    before=pointer()
+                    with lock():
+                        if choice=='3':
+                            ui.note('Downloading, verifying and validating the release...','brand')
+                            install(restart=bool(running))
+                        else:
+                            target=pointer('previous')
+                            if not target:raise SafeError('No previous local version')
+                            ui.note('Restoring the previous local runtime...','brand')
+                            activate(target,restart=bool(running));ui.note('Rolled back to '+target.name,'ok')
+                    after=pointer()
+                    if before!=after:
+                        ui.note('Version changed. Run dv-tunnel again to load its menu.','ok')
+                        return
             elif choice in ('5','6','7'):
-                name=instance_name(input('Instance name: ').strip())
-                action={'5':'start','6':'stop','7':'restart'}[choice]
-                confirm=action=='start' or input('Type YES to interrupt this instance: ').strip()=='YES'
-                if confirm:
-                    with lock():service_action(action,name,yes=True)
+                if not rows:
+                    ui.note('No managed instance. Import a pair with dv-tunnel import first.','warn')
+                    ui.note('See docs/UPDATE.md; existing test directories stay untouched.')
+                else:
+                    ui.note('Available instances: '+', '.join(r['name'] for r in rows),'brand')
+                    name=instance_name(input(ui.paint('  Instance name > ','brand')).strip())
+                    action={'5':'start','6':'stop','7':'restart'}[choice]
+                    confirm=action=='start' or input(ui.paint('  Type YES to interrupt this instance > ','warn')).strip()=='YES'
+                    if confirm:
+                        with lock():service_action(action,name,yes=True)
+                    else:ui.note('Cancelled. No change was made.')
+            else:ui.note('Choose a number from 0 to 7.','warn')
+        except EOFError:ui.note('Input closed. No further action taken.');return
         except (Exception,KeyboardInterrupt) as e:
-            print('Not completed:',str(e) if isinstance(e,SafeError) else type(e).__name__)
+            ui.note('Not completed: '+(str(e) if isinstance(e,SafeError) else type(e).__name__),'error')
+        if ui.interactive:
+            try:input(ui.paint('  Press Enter to return to the menu...','muted'))
+            except (EOFError,KeyboardInterrupt):return
 
 
 def main():
