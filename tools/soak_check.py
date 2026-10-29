@@ -140,6 +140,14 @@ class QueueDiagnostics:
                 kernel[key]=int((Path('/sys/class/net')/self.iface/'statistics'/key).read_text())
             result['tun_kernel']=kernel
             if getattr(self,'cpu_ids',None):result['cpu']=cpu_snapshot(self.cpu_ids)
+            if getattr(self,'resource_details',False):
+                result['memory_available_mib']=next(
+                    int(x.split()[1])/1024 for x in Path('/proc/meminfo').read_text().splitlines()
+                    if x.startswith('MemAvailable:'))
+                result['rss_mib']={}
+                for label,(pid,_) in self.cpu_ids.items():
+                    fields=(Path('/proc')/str(pid)/'statm').read_text().split()
+                    result['rss_mib'][label]=int(fields[1])*os.sysconf('SC_PAGE_SIZE')/1048576
         except Exception as exc:result['error_type']=type(exc).__name__
         return result
     def loop(self):
@@ -251,7 +259,8 @@ def udp_probe(peer,port,seconds,pps,stop,capture=None):
 
 def phase_ok(result):
     probes=[result['udp_local_initiated'],result['udp_peer_initiated']]
-    if result['tcp']['errors'] or result['tcp']['completed']<1:return False
+    required=0 if result.get('spec',{}).get('tcp_workers')==0 else 1
+    if result['tcp']['errors'] or result['tcp']['completed']<required:return False
     if any(not isinstance(p,dict) or p.get('aborted') for p in probes):return False
     for p in probes:
         if not p['pass_integrity'] or p['duplicates'] or p['per_flow_reordered']:return False
@@ -308,7 +317,7 @@ def make_handler(h):
                 initial=getattr(o,'initial',None);suite=getattr(o,'suite',None)
                 if initial is None or suite is None:
                     h.send_json(self.request,dict(ok=False,suite='initializing'));return
-                h.send_json(self.request,dict(ok=True,suite=suite,version=initial['stats'].get('version'),packet_limits={k:v.get('packet_limit') for k,v in initial['stats'].get('lanes',{}).items()},udp_wait_ms=initial['stats'].get('lanes',{}).get('udp',{}).get('queue_wait_ms')));return
+                h.send_json(self.request,dict(ok=True,suite=suite,plan_sha256=getattr(o,'plan_sha256',None),version=initial['stats'].get('version'),packet_limits={k:v.get('packet_limit') for k,v in initial['stats'].get('lanes',{}).items()},udp_wait_ms=initial['stats'].get('lanes',{}).get('udp',{}).get('queue_wait_ms')));return
             if op=='transfer':
                 data=h.read_exact(self.request,h.SIZE)
                 if data!=h.PAYLOAD:raise ValueError('Upload integrity failure')
@@ -323,12 +332,16 @@ def make_handler(h):
                 spec=o.phase_specs[ident-1]
                 self.request.settimeout(spec['seconds']+20)
                 try:
+                    phase_start=time.monotonic()
                     before=o.live.inspect_link(o.args)
                     result=udp_probe(o.peer,o.peer_udp_port,spec['seconds'],spec['pps'],o.stop,capture=lambda r:o.partial_probes.__setitem__(str(ident),r))
+                    phase_end=time.monotonic()
                     checkpoint=o.live.inspect_link(o.args)
-                    answer=dict(id=ident,udp=result,carrier_checkpoint=checkpoint,carrier_delta=o.live.deltas(before['stats'],checkpoint['stats']))
+                    answer=dict(id=ident,spec=spec,resource_window=dict(start_monotonic=phase_start,end_monotonic=phase_end),
+                                udp=result,carrier_checkpoint=checkpoint,carrier_delta=o.live.deltas(before['stats'],checkpoint['stats']))
                 except Exception as e:
-                    o.stop.set();answer=dict(id=ident,error_type=type(e).__name__,udp=o.partial_probes.get(str(ident)))
+                    o.stop.set();answer=dict(id=ident,spec=spec,error_type=type(e).__name__,udp=o.partial_probes.get(str(ident)),
+                        resource_window=dict(start_monotonic=phase_start,end_monotonic=time.monotonic()))
                 with o.lock:o.phase_results.append(answer)
                 h.send_json(self.request,answer);return
             if op=='finish':
@@ -357,12 +370,13 @@ def transfer_worker(h,peer,port,pacer,stop,end):
 def run_phase(h,args,spec,stop,ports,progress=None):
     progress=progress if progress is not None else {}
     tcp,udp=ports;start=time.monotonic();end=start+spec['seconds'];pacer=h.Pacer(mbps=2)
+    progress['resource_window']=dict(start_monotonic=start,end_monotonic=None)
     def captured(result):progress['udp_local_initiated']=result
     errors=[];a=b=None;tcp_results=[]
     with cf.ThreadPoolExecutor(max_workers=6) as pool:
         reverse=pool.submit(rpc,h,args.peer,tcp,dict(op='soak_phase',id=spec['id']),spec['seconds']+20)
         local=pool.submit(udp_probe,args.peer,udp,spec['seconds'],spec['pps'],stop,captured)
-        workers=[pool.submit(transfer_worker,h,args.peer,tcp,pacer,stop,end) for _ in range(4)]
+        workers=[pool.submit(transfer_worker,h,args.peer,tcp,pacer,stop,end) for _ in range(spec.get('tcp_workers',4))]
         try:
             a=local.result(timeout=spec['seconds']+15)
             b=reverse.result(timeout=spec['seconds']+20)
@@ -375,6 +389,7 @@ def run_phase(h,args,spec,stop,ports,progress=None):
                 except (Exception,KeyboardInterrupt) as exc:
                     stop.set();errors.append(type(exc).__name__)
     completed=sum(x['completed'] for x in tcp_results)
+    progress['resource_window']['end_monotonic']=time.monotonic()
     progress.update(spec=spec,tcp=dict(completed=completed,errors=errors+[e for x in tcp_results for e in x['errors']],
                     upload_bytes=completed*h.SIZE,download_bytes=completed*h.SIZE),
                     udp_local_initiated=a or progress.get('udp_local_initiated'),
@@ -395,6 +410,99 @@ def ladder_phases():
     return [dict(id=1,seconds=30,pps=700),dict(id=2,seconds=30,pps=1000)]
 
 
+def comprehensive_phases():
+    # Existing probe limits remain: <=2000pps and <=60000 packets per probe.
+    # Isolate UDP cost, hold the known rate, then increase; return to light load.
+    return [
+        dict(id=1,name='udp_only_9.6',seconds=30,pps=1000,tcp_workers=0),
+        dict(id=2,name='mixed_9.6_hold',seconds=60,pps=1000,tcp_workers=4),
+        dict(id=3,name='mixed_14.4',seconds=30,pps=1500,tcp_workers=4),
+        dict(id=4,name='mixed_19.2',seconds=30,pps=2000,tcp_workers=4),
+        dict(id=5,name='light_recovery_4.8',seconds=30,pps=500,tcp_workers=4),
+    ]
+
+
+def resource_summary(samples,start,end,hz):
+    """Use only fully contained observation intervals; never infer phase timing."""
+    valid=[x for x in samples if 'cpu' in x and 'error_type' not in x
+           and start is not None and end is not None and start<=x['monotonic']<=end]
+    intervals=[];rejected=0
+    for a,b in zip(valid,valid[1:]):
+        dt=b['monotonic']-a['monotonic'];ca=a['cpu'];cb=b['cpu']
+        if not 0<dt<=2 or ca['logical_cpus']!=cb['logical_cpus']:
+            rejected+=1;continue
+        ticks={k:cb['host_ticks'][k]-v for k,v in ca['host_ticks'].items()}
+        total=sum(ticks.values());n=ca['logical_cpus'];metrics={}
+        if total<=0 or min(ticks.values())<0 or n<=0 or not hz:
+            rejected+=1;continue
+        metrics['host_busy_pct']=100*(total-ticks['idle']-ticks['iowait'])/total
+        metrics['host_steal_pct']=100*ticks['steal']/total
+        identity_ok=True
+        for label,p in ca['processes'].items():
+            q=cb['processes'].get(label,{})
+            if (p['pid'],p['start_ticks'])!=(q.get('pid'),q.get('start_ticks')):
+                identity_ok=False;break
+            delta=q['user_ticks']+q['system_ticks']-p['user_ticks']-p['system_ticks']
+            if delta<0:identity_ok=False;break
+            metrics[label+'_one_core_pct']=100*delta/hz/dt
+            metrics[label+'_host_capacity_pct']=100*delta/hz/dt/n
+        if not identity_ok:
+            rejected+=1;continue
+        intervals.append((dt,metrics))
+    coverage=sum(dt for dt,_ in intervals)
+    result=dict(requested_window_s=(end-start) if start is not None and end is not None else None,
+                sampled_coverage_s=coverage,interval_count=len(intervals),rejected_intervals=rejected,
+                logical_cpus=valid[0]['cpu']['logical_cpus'] if valid else None,
+                metrics={},memory_available_min_mib=None,rss_peak_mib={})
+    if coverage:
+        for key in intervals[0][1]:
+            result['metrics'][key]=dict(
+                mean=sum(dt*m[key] for dt,m in intervals)/coverage,
+                peak_sample=max(m[key] for _,m in intervals))
+    memory=[x['memory_available_mib'] for x in valid if 'memory_available_mib' in x]
+    if memory:result['memory_available_min_mib']=min(memory)
+    for label in ('carrier','checker','runner'):
+        values=[x['rss_mib'][label] for x in valid if label in x.get('rss_mib',{})]
+        if values:result['rss_peak_mib'][label]=max(values)
+    return result
+
+
+def attach_resource_summaries(report):
+    diagnostic=report.get('queue_diagnostics',{})
+    samples=diagnostic.get('samples',[]);hz=diagnostic.get('cpu_clock_ticks_per_second')
+    result=dict(notes=[
+        'CPU peaks are sampled interval averages, not instantaneous CPU peaks.',
+        'Process host-capacity percent divides one-core percent by logical CPU count.',
+        'Host busy includes steal; process CPU excludes kernel network work outside those processes.',
+        'Checker CPU includes its threads, but not unreaped subprocess CPU; no production process inventory.',
+        'Only intervals fully inside explicit local phase markers are included; coverage is reported.',
+        'Server UDP window and client window including TCP completion can differ slightly.',
+        'RSS is per process; it does not include all kernel socket/TUN memory.',
+    ],phases=[])
+    baseline=report.get('cpu_baseline')
+    if baseline:
+        result['baseline']=resource_summary(samples,baseline.get('start_monotonic'),baseline.get('end_monotonic'),hz)
+    phases=report.get('phases') or report.get('server_phase_results',[])
+    for phase in phases:
+        window=phase.get('resource_window',{})
+        result['phases'].append(dict(id=phase.get('spec',{}).get('id',phase.get('id')),
+            summary=resource_summary(samples,window.get('start_monotonic'),window.get('end_monotonic'),hz)))
+    result['coverage_complete']=bool(result['phases']) and all(
+        x['summary']['interval_count']>0 and x['summary']['rejected_intervals']==0
+        and x['summary']['sampled_coverage_s']>=max(.1,(x['summary']['requested_window_s'] or 0)-2)
+        for x in result['phases'])
+    report['resource_summary']=result
+    if report.get('status') in ('passed','completed') and not result['coverage_complete']:
+        report['status']='resource_measurement_incomplete'
+    if report.get('role')=='client':
+        passed=[p for p in phases if p.get('gate_passed')]
+        report['highest_passed_udp_mbps_per_initiator']=max(
+            (p['spec']['pps']*PAYLOAD_BYTES*8/1e6 for p in passed),default=None)
+        report['highest_passed_mixed_udp_mbps_per_initiator']=max(
+            (p['spec']['pps']*PAYLOAD_BYTES*8/1e6 for p in passed if p['spec'].get('tcp_workers',4)>0),default=None)
+        report['capacity_limit_established']=False
+
+
 def run(args,live=None,helper=None,phases=None,ports=None):
     os.umask(0o077);diagnostic=getattr(args,'queue_diagnostic',False);lean=getattr(args,'lean_observer',False);report=dict(suite=('dv-queue-diagnostic-lean-v1' if lean else 'dv-queue-diagnostic-v1') if diagnostic else 'dv-soak-v2',role=args.role,status='failed',started_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
         notes=['Only existing test link; no carrier/service/config/firewall/routes changed.',
@@ -413,10 +521,17 @@ def run(args,live=None,helper=None,phases=None,ports=None):
     ladder=getattr(args,'rate_ladder',False)
     if ladder:
         specs=phases or ladder_phases();report['suite']='dv-rate-ladder-lean-v1'
+    comprehensive=getattr(args,'comprehensive',False)
+    if comprehensive:
+        specs=phases or comprehensive_phases();report['suite']='dv-comprehensive-lean-v1'
+        report['notes'][1]='UDP-only first, then mixed load with four TCP workers and aggregate 2Mbps TCP pacing per endpoint; final light-load recovery runs only if preceding gates pass.'
+        report['notes'].append('Maximum planned rate is a bounded test ceiling, not proven maximum tunnel or WAN capacity.')
     report['planned_phases']=specs
     args.expect_profile='split-udp-v1'
     try:
         if ladder and (not diagnostic or not lean or duration!=30):raise ValueError('Rate ladder requires queue diagnostic, lean observer and default diagnostic duration')
+        if comprehensive and (ladder or not diagnostic or not lean or duration!=30):
+            raise ValueError('Comprehensive mode requires lean queue diagnostic, no rate ladder and default diagnostic duration')
         if not diagnostic and duration!=30:raise ValueError('Diagnostic duration requires queue diagnostic')
         report['before']=live.inspect_link(args)
         expected=getattr(args,'expect_version',None)
@@ -429,6 +544,7 @@ def run(args,live=None,helper=None,phases=None,ports=None):
         if not 0<=baseline<=30 or (baseline and not diagnostic):raise ValueError('CPU baseline needs queue diagnostic and 0..30 seconds')
         if lean and not diagnostic:raise ValueError('Lean observer requires queue diagnostic')
         if diagnostic:observer=QueueDiagnostics(report['before']['main_pid'],args.iface,lean=True) if lean else QueueDiagnostics(report['before']['main_pid'],args.iface)
+        if observer and comprehensive:observer.resource_details=True
         guard=h.HostGuard();monitor=Monitor(live,args,guard.stop)
         if observer:observer.load_stop=guard.stop
         if baseline:
@@ -442,6 +558,7 @@ def run(args,live=None,helper=None,phases=None,ports=None):
         services=h.Services(args.local,args.peer,tcp_port=tl,udp_port=ul,peer_udp_port=up,allow_reconnect=False)
         services.stop=guard.stop;services.live=live;services.args=args;services.initial=report['before'];services.suite=report['suite']
         services.phase_lock=threading.Lock();services.next_phase=1;services.phase_specs=specs;services.phase_results=[];services.partial_probes={}
+        services.plan_sha256=hashlib.sha256(json.dumps(specs,sort_keys=True,separators=(',',':')).encode()).hexdigest()
         report['phases']=[]
         if args.role=='server':
             print('SOAK_SERVER_READY — now run Iran; leave this terminal open',flush=True)
@@ -455,6 +572,8 @@ def run(args,live=None,helper=None,phases=None,ports=None):
         else:
             greeting=rpc(h,args.peer,tp,dict(op='ping'))
             if greeting.get('suite')!=report['suite']:raise RuntimeError('Both endpoints must run the same checker mode')
+            if comprehensive and greeting.get('plan_sha256')!=services.plan_sha256:
+                raise RuntimeError('Peer comprehensive phase plan does not match')
             if expected and greeting.get('version')!=expected:raise RuntimeError('Peer carrier version does not match experiment')
             if expected_packets is not None and any(greeting.get('packet_limits',{}).get(k)!=expected_packets for k in ('tcp','udp')):raise RuntimeError('Peer lane packet cap does not match experiment')
             if expected_wait is not None and greeting.get('udp_wait_ms')!=expected_wait:raise RuntimeError('Peer UDP wait does not match experiment')
@@ -506,6 +625,11 @@ def run(args,live=None,helper=None,phases=None,ports=None):
             report['queue_diagnostics']=observer.close()
             if report['queue_diagnostics'].get('safety_stop_reason'):
                 report['status']='failed';report.setdefault('error',report['queue_diagnostics']['safety_stop_reason'])
+        if comprehensive:
+            try:attach_resource_summaries(report)
+            except (ValueError,KeyError,TypeError,ZeroDivisionError) as exc:
+                report['resource_summary_error_type']=type(exc).__name__
+                report['status']='resource_measurement_incomplete'
         report['finished_utc']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
         live.write_report(args.output,args.role,report)
     return 0 if report['status'] in ('passed','completed') else 1
@@ -515,6 +639,7 @@ def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('role',choices=['server','client'])
     ap.add_argument('--queue-diagnostic',action='store_true',help='One bounded 4.8Mbps phase with read-only carrier-owned TCP and TUN counters; no tuning or carrier changes');ap.add_argument('--expect-version');ap.add_argument('--expect-lane-packets',type=int);ap.add_argument('--expect-udp-wait-ms',type=int);ap.add_argument('--instance',default='main');ap.add_argument('--iface',default='wft0')
     ap.add_argument('--rate-ladder',action='store_true',help='Lean queue diagnostic only: bounded 30s phases at 6.72 then 9.6Mbps per UDP initiator; escalate only after quality gate')
+    ap.add_argument('--comprehensive',action='store_true',help='Lean diagnostic: UDP-only, sustained mixed, bounded rate ladder and light-load recovery, with per-phase CPU/RSS summaries; no carrier changes')
     ap.add_argument('--diagnostic-seconds',type=int,choices=(30,120),default=30,help='Queue diagnostic duration only; fixed UDP rate and unchanged safety gates')
     ap.add_argument('--lean-observer',action='store_true',help='Queue diagnostic only: verify sockets once, keep CPU/TUN and safety polling; no periodic ss process scans')
     ap.add_argument('--cpu-baseline-seconds',type=int,default=0,help='0..30 seconds without test load before services; queue diagnostic only; safety guards unchanged')
