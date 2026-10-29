@@ -108,3 +108,43 @@ Checker v2 corrects partial reporting and separates measurement termination from
 preview.4 evaluates one-shot datagram writer scheduling yield/retry, keeping the
 existing caps and budgets unchanged. This directly tests a bounded runnable-writer
 burst hypothesis, not larger buffers. See SPLIT-UDP.md; new field acceptance pending.
+
+
+## preview.4 field soak: low-rate acceptance, next-step abort
+
+Both peers reported preview.4 / split-udp-v1. The complete 120-second phase at
+1.92 Mbps payload per initiating sender passed: 24000/24000 unique UDP echoes in
+each direction (48000/48000 combined), 94 completed TCP upload/download integrity
+transactions, no new carrier drop or session change. The UDP RTT p99 values were
+209.409 ms (Iran initiated) and 214.892 ms (Turkey initiated). This is a single
+observed pass, not a causal proof of the yield change or higher capacity.
+
+The 4.8 Mbps-per-initiator step aborted roughly seven seconds after starting.
+Final packet-cap drop deltas were Iran 43, Turkey 72, all in the datagram lane.
+Turkey crossed the existing >=64-drop hard-stop. Both byte/expiry deltas stayed
+zero. The one-yield policy retried successfully 5/48 full-queue attempts on Iran
+and 0/72 on Turkey: it is insufficient, not a field fix. Cumulative max datagram
+writer time since startup was 82.012 / 104.914 ms respectively, including host
+scheduling, not proof of TCP retransmissions or WAN cause.
+
+Partial UDP unreturned-at-stop counts were 521 Iran-initiated and 78 Turkey-initiated;
+missing_by_deadline remains null because the drain did not complete. These counts
+must not be presented as proven final loss. Four TCP workers returned EOFError
+after early termination; this does not establish payload corruption. Neither the
+9.6 nor 19.2 Mbps stage ran. Iran's subsequent ConnectionRefusedError concerns
+the peer test service after it stopped, not proof that the carrier disconnected.
+
+Both final carrier PIDs were unchanged, session delta zero, both lanes connected
+at checkpoints and sampled times, own test socket cleanup OK. Whole-host CPU
+peaked at 61.98% Iran / 89.11% Turkey, but neither host guard reported a stop
+(the CPU guard requires two consecutive excessive samples). No guarantee of zero
+production impact is implied. Source-allowlist rejection delta was four at each
+endpoint; no capture identifies its source and it is not an attack diagnosis.
+
+Original uploaded report.json SHA256:
+- iran: 98f94d0f6a5c03b70d759fcbcd40bafc66750eb6bfc56355c2225c6481922943
+- turkey: 04a7c6e4f8155fd679824859597a9eb3baf6f7aa6e2af10e928b05f1ba0df9f6
+
+Next: QUEUE-DIAGNOSTIC.md. Only the failing load is repeated, with read-only
+carrier-owned TCP/TUN observations. No new runtime release, queue enlargement or
+server mutation is justified yet. No real-server diagnostic result is claimed.

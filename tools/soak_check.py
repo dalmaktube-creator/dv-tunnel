@@ -9,6 +9,9 @@ import math
 import os
 from pathlib import Path
 import selectors
+import re
+import shutil
+import subprocess
 import signal
 import socket
 import struct
@@ -36,6 +39,68 @@ def load_live():
     with urllib.request.urlopen(LIVE_URL,timeout=25) as r:data=r.read(131073)
     if len(data)>131072:raise RuntimeError('Helper too large')
     return module_from_bytes(data)
+
+
+# Observation only: numeric TCP socket fields for this carrier PID, never addresses,
+# process arguments, payloads, private configuration or another process's sockets.
+TCP_KEYS=set("rto rtt ato mss pmtu cwnd ssthresh bytes_sent bytes_retrans bytes_acked bytes_received segs_out segs_in data_segs_out data_segs_in unacked retrans notsent minrtt rcv_rtt busy rwnd_limited sndbuf_limited".split())
+
+
+def parse_tcp_samples(text,pid):
+    result=[];current=None
+    for line in text.splitlines():
+        cols=line.split()
+        if cols and cols[0] in {'ESTAB','SYN-SENT','SYN-RECV','FIN-WAIT-1','FIN-WAIT-2','TIME-WAIT','CLOSE-WAIT','LAST-ACK','CLOSING','CLOSED'}:
+            current=None
+            if len(cols)<5 or cols[0]!='ESTAB' or not re.search(r'pid='+str(pid)+r'(?=,|\))',line):continue
+            try:current=dict(recv_q=int(cols[1]),send_q=int(cols[2]))
+            except ValueError:continue
+            fd=re.search(r'fd=(\d+)',line)
+            if fd:current['fd']=int(fd.group(1))
+            result.append(current)
+        elif current is not None:
+            for token in line.split():
+                key,sep,value=token.partition(':')
+                if sep and key in TCP_KEYS and re.fullmatch(r'[0-9./]+(?:ms|us|s)?',value):current[key]=value
+    return result[:8]
+
+
+class QueueDiagnostics:
+    def __init__(self,pid,iface):
+        if not isinstance(pid,int) or pid<=0 or not re.fullmatch(r'[a-zA-Z0-9_-]{1,15}',iface):raise ValueError('Diagnostic identity invalid')
+        self.pid,self.iface=pid,iface;self.ss=shutil.which('ss')
+        if not self.ss:raise RuntimeError('ss is required for queue diagnostics')
+        self.samples=[];self.done=threading.Event();self.errors=0;self.thread=None
+        first=self.sample()
+        if 'error_type' in first or len(first.get('tcp_sockets',[]))!=2:raise RuntimeError('Expected two established carrier-owned TCP sockets on port 42443')
+        self.samples.append(first)
+        self.thread=threading.Thread(target=self.loop,daemon=True);self.thread.start()
+    def sample(self):
+        result=dict(monotonic=time.monotonic(),utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))
+        try:
+            p=subprocess.run([self.ss,'-Htinp','( sport = :42443 or dport = :42443 )'],capture_output=True,text=True,timeout=.5,check=True)
+            if len(p.stdout)>1048576:raise ValueError('Socket observation too large')
+            result['tcp_sockets']=parse_tcp_samples(p.stdout,self.pid)
+            kernel={}
+            for key in ('rx_packets','tx_packets','rx_dropped','tx_dropped','rx_errors','tx_errors'):
+                kernel[key]=int((Path('/sys/class/net')/self.iface/'statistics'/key).read_text())
+            result['tun_kernel']=kernel
+        except Exception as exc:result['error_type']=type(exc).__name__
+        return result
+    def loop(self):
+        while len(self.samples)<900 and not self.done.wait(.5):
+            sample=self.sample();self.errors+=int('error_type' in sample);self.samples.append(sample)
+    def close(self):
+        self.done.set()
+        if self.thread:self.thread.join(2)
+        return dict(kind='carrier-owned-tcp-and-tun-v1',sample_interval_s=.5,max_samples=900,
+                    samples=self.samples,observation_errors=self.errors,
+                    sample_cap_reached=len(self.samples)>=900,
+                    notes=['Read-only numeric ss fields, filtered by carrier PID, established sockets and TCP port 42443.',
+                           'FD identifies a local socket only; not a proven UDP/TCP lane mapping. FD can be reused after reconnect.',
+                           'Socket counters are cumulative: compare same socket over time, not endpoint totals.',
+                           'Half-second polling can miss short stalls; no causal WAN or loss attribution from a correlation alone.',
+                           'TUN kernel counters are interface-wide, not probe sequence counters. Sampling itself has some overhead.'])
 
 
 def packet(nonce,seq):
@@ -170,7 +235,7 @@ def make_handler(h):
         def handle(self):
             self.request.settimeout(15);o=self.server.owner
             obj=h.recv_json(self.request);op=obj.get('op')
-            if op=='ping':h.send_json(self.request,dict(ok=True,suite='dv-soak-v2',version=o.initial['stats'].get('version')));return
+            if op=='ping':h.send_json(self.request,dict(ok=True,suite=o.suite,version=o.initial['stats'].get('version')));return
             if op=='transfer':
                 data=h.read_exact(self.request,h.SIZE)
                 if data!=h.PAYLOAD:raise ValueError('Upload integrity failure')
@@ -248,7 +313,7 @@ def run_phase(h,args,spec,stop,ports,progress=None):
 
 
 def run(args,live=None,helper=None,phases=None,ports=None):
-    os.umask(0o077);report=dict(suite='dv-soak-v2',role=args.role,status='failed',started_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
+    os.umask(0o077);diagnostic=getattr(args,'queue_diagnostic',False);report=dict(suite='dv-queue-diagnostic-v1' if diagnostic else 'dv-soak-v2',role=args.role,status='failed',started_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
         notes=['Only existing test link; no carrier/service/config/firewall/routes changed.',
                'Four TCP workers, aggregate 2 Mbps payload pacer at each endpoint, overlap both initiating UDP directions.',
                'UDP echo return adds load; requested payload rate is per initiating sender, not total wire traffic.',
@@ -260,17 +325,18 @@ def run(args,live=None,helper=None,phases=None,ports=None):
                'Other immediate guards and phase gates remain: host limits, session/PID/profile change, no echo, integrity/reordering, p99>500ms, achieved rate<90%.',
                'Aborted probes use unreturned_at_stop, NOT missing_by_deadline, because the final drain did not complete.',
                'Whole-host CPU85% twice/memory192MiB guards reduce risk, not zero production-impact guarantee.'])
-    guard=services=monitor=None;live=live or load_live();h=helper or live.load_helper();specs=phases or PHASES
+    guard=services=monitor=observer=None;live=live or load_live();h=helper or live.load_helper();specs=phases or ([dict(id=1,seconds=30,pps=500)] if diagnostic else PHASES)
     args.expect_profile='split-udp-v1'
     try:
         report['before']=live.inspect_link(args)
         expected=getattr(args,'expect_version',None)
         if expected and report['before']['stats'].get('version')!=expected:raise RuntimeError('Installed carrier version does not match experiment')
+        if diagnostic:observer=QueueDiagnostics(report['before']['main_pid'],args.iface)
         guard=h.HostGuard();monitor=Monitor(live,args,guard.stop)
         h.Handler=make_handler(h)
         tl,ul,tp,up=ports or (h.TCP_PORT,h.UDP_PORT,h.TCP_PORT,h.UDP_PORT)
         services=h.Services(args.local,args.peer,tcp_port=tl,udp_port=ul,peer_udp_port=up,allow_reconnect=False)
-        services.stop=guard.stop;services.live=live;services.args=args;services.initial=report['before']
+        services.stop=guard.stop;services.live=live;services.args=args;services.initial=report['before'];services.suite=report['suite']
         services.phase_lock=threading.Lock();services.next_phase=1;services.phase_specs=specs;services.phase_results=[];services.partial_probes={}
         report['phases']=[]
         if args.role=='server':
@@ -284,7 +350,7 @@ def run(args,live=None,helper=None,phases=None,ports=None):
             report['status']='completed';report['tcp_transfers_served']=services.transfers
         else:
             greeting=rpc(h,args.peer,tp,dict(op='ping'))
-            if greeting.get('suite')!='dv-soak-v2':raise RuntimeError('Both endpoints must run checker v2')
+            if greeting.get('suite')!=report['suite']:raise RuntimeError('Both endpoints must run the same checker mode')
             if expected and greeting.get('version')!=expected:raise RuntimeError('Peer carrier version does not match experiment')
             for spec in specs:
                 print('PHASE',spec['id'],'seconds',spec['seconds'],'UDP Mbps per initiator',spec['pps']*.0096,flush=True)
@@ -329,6 +395,7 @@ def run(args,live=None,helper=None,phases=None,ports=None):
                 report['udp_probe_summaries']=dict(services.partial_probes)
         if guard:
             guard.close();report['host']=dict(cpu_max_sample_pct=guard.cpu_max,mem_available_min_sample_mib=guard.mem_min,stop_reason=guard.reason)
+        if observer:report['queue_diagnostics']=observer.close()
         report['finished_utc']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
         live.write_report(args.output,args.role,report)
     return 0 if report['status'] in ('passed','completed') else 1
@@ -336,9 +403,9 @@ def run(args,live=None,helper=None,phases=None,ports=None):
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('role',choices=['server','client'])
-    ap.add_argument('--expect-version');ap.add_argument('--instance',default='main');ap.add_argument('--iface',default='wft0')
-    ap.add_argument('--local');ap.add_argument('--peer');ap.add_argument('--output',default='/root/dv-soak-results')
-    args=ap.parse_args();args.local=args.local or ('10.254.253.2' if args.role=='server' else '10.254.253.1');args.peer=args.peer or ('10.254.253.1' if args.role=='server' else '10.254.253.2')
+    ap.add_argument('--queue-diagnostic',action='store_true',help='One 30s 4.8Mbps phase with read-only carrier-owned TCP and TUN counters; no tuning or carrier changes');ap.add_argument('--expect-version');ap.add_argument('--instance',default='main');ap.add_argument('--iface',default='wft0')
+    ap.add_argument('--local');ap.add_argument('--peer');ap.add_argument('--output')
+    args=ap.parse_args();args.output=args.output or ('/root/dv-queue-diag-results' if args.queue_diagnostic else '/root/dv-soak-results');args.local=args.local or ('10.254.253.2' if args.role=='server' else '10.254.253.1');args.peer=args.peer or ('10.254.253.1' if args.role=='server' else '10.254.253.2')
     signal.signal(signal.SIGTERM,lambda s,f:(_ for _ in ()).throw(KeyboardInterrupt()))
     return run(args)
 

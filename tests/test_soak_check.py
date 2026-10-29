@@ -143,7 +143,7 @@ class SoakTests(unittest.TestCase):
         self.assertEqual(r['udp_local_initiated'],partial);self.assertIsNone(r['udp_peer_initiated'])
         self.assertIn('TimeoutError',r['tcp']['errors']);self.assertFalse(S.phase_ok(r))
 
-    def test_two_role_suite_without_carrier_or_config_access(self):
+    def _two_role_suite(self,diagnostic=False):
         l,h=helper();h.SIZE=4096;h.PAYLOAD=bytes(range(256))*16;h.HASH=hashlib.sha256(h.PAYLOAD).hexdigest()
         pacer=h.Pacer
         before=dict(main_pid=123,stats=dict(version='v0.1.0-preview.3',connected=1,sessions=2,drops=0,spoofed_drops=0,tx_datagrams=0,rx_datagrams=0,drop_reasons={},transport_profile='split-udp-v1'))
@@ -154,7 +154,7 @@ class SoakTests(unittest.TestCase):
         for s in held:s.close()
         phases=[dict(id=1,seconds=.2,pps=100),dict(id=2,seconds=.2,pps=200)]
         with tempfile.TemporaryDirectory() as tmp,patch.object(l,'inspect_link',return_value=before),patch.object(l,'stats',return_value=before['stats']),patch.object(h,'Pacer',side_effect=lambda mbps=2:pacer(mbps=100)),patch.object(h,'Carrier',side_effect=AssertionError('No carrier control')):
-            server=argparse.Namespace(role='server',local='127.0.0.1',peer='127.0.0.1',instance='main',iface='unused',output=tmp+'/server')
+            server=argparse.Namespace(role='server',local='127.0.0.1',peer='127.0.0.1',instance='main',iface='unused',output=tmp+'/server',queue_diagnostic=diagnostic)
             client=argparse.Namespace(**dict(vars(server),role='client',output=tmp+'/client'))
             values=[]
             t=threading.Thread(target=lambda:values.append(S.run(server,live=l,helper=h,phases=phases,ports=tuple(ports))),daemon=True);t.start()
@@ -170,3 +170,57 @@ class SoakTests(unittest.TestCase):
             self.assertEqual(d['status'],'passed');self.assertEqual(len(d['phases']),2)
             self.assertTrue(d['carrier_main_pid_unchanged']);self.assertEqual(d['test_socket_cleanup'],'OK')
             self.assertTrue(all(x['tcp']['completed']>0 for x in d['phases']))
+
+            self.assertEqual(d['suite'],'dv-queue-diagnostic-v1' if diagnostic else 'dv-soak-v2')
+            if diagnostic:self.assertIn('queue_diagnostics',d)
+
+    def test_two_role_suite_without_carrier_or_config_access(self):
+        self._two_role_suite()
+
+    def test_diagnostic_two_roles_keep_orchestration_and_report(self):
+        class Observer:
+            def __init__(self,pid,iface):pass
+            def close(self):return dict(samples=[dict(tcp_sockets=[])],observation_errors=0)
+        with patch.object(S,'QueueDiagnostics',Observer):self._two_role_suite(True)
+
+    def test_tcp_parser_limits_to_owned_established_numeric_fields(self):
+        text='ESTAB 0 131072 31.40.204.56:42443 87.107.206.82:45000 users:(("secret-command",pid=123,fd=6))\n     cubic rtt:52.1/3.2 rto:204 cwnd:10 retrans:0/4 bytes_retrans:4800 notsent:32000 forbidden:secret\nESTAB 1 9 1.2.3.4:1 5.6.7.8:2 users:(("unrelated",pid=1234,fd=7))\n     cubic rtt:99/1 cwnd:2\n CLOSE-WAIT 2 3 1.2.3.4:1 5.6.7.8:2 users:(("same",pid=123,fd=9))\n     cubic rtt:11/2\n  ESTAB 1 2 1.2.3.4:1 5.6.7.8:2 users:(("owned",pid=123,fd=8))\n     cubic rtt:50/2 send:4Mbps\n'
+        result=S.parse_tcp_samples(text,123)
+        self.assertEqual(len(result),2);self.assertEqual(result[0]['fd'],6)
+        self.assertEqual(result[0]['retrans'],'0/4');self.assertEqual(result[0]['send_q'],131072)
+        self.assertEqual(result[1]['rtt'],'50/2')
+        saved=json.dumps(result)
+        for forbidden in ['31.40','87.107','secret','unrelated','Mbps']:self.assertNotIn(forbidden,saved)
+
+    def test_diagnostic_sampling_is_read_only_fixed_argv(self):
+        from types import SimpleNamespace
+        obj=S.QueueDiagnostics.__new__(S.QueueDiagnostics);obj.ss='/usr/bin/ss';obj.pid=123;obj.iface='wft0'
+        output='ESTAB 0 0 A:42443 B:1 users:(("dv-tunnel",pid=123,fd=6))\n    cubic rtt:50/2\n'
+        with patch.object(S.subprocess,'run',return_value=SimpleNamespace(stdout=output)) as run,patch.object(Path,'read_text',return_value='0'):
+            result=obj.sample()
+        self.assertEqual(len(result['tcp_sockets']),1);self.assertEqual(result['tun_kernel']['tx_dropped'],0)
+        self.assertEqual(run.call_args.args[0],['/usr/bin/ss','-Htinp','( sport = :42443 or dport = :42443 )'])
+        self.assertNotIn('shell',run.call_args.kwargs);self.assertEqual(run.call_args.kwargs['timeout'],.5)
+
+    def test_diagnostic_preflight_fails_before_any_thread_when_sockets_missing(self):
+        with patch.object(S.shutil,'which',return_value='/usr/bin/ss'),patch.object(S.QueueDiagnostics,'sample',return_value=dict(tcp_sockets=[])),patch.object(S.threading,'Thread') as t:
+            with self.assertRaisesRegex(RuntimeError,'two established'):S.QueueDiagnostics(123,'wft0')
+            t.assert_not_called()
+        with self.assertRaises(ValueError):S.QueueDiagnostics(123,'../../etc')
+
+    def test_diagnostic_sample_retention_is_bounded(self):
+        from types import SimpleNamespace
+        obj=S.QueueDiagnostics.__new__(S.QueueDiagnostics);obj.samples=[];obj.errors=0
+        obj.done=SimpleNamespace(wait=lambda _:False);obj.sample=lambda:dict(error_type='TimeoutExpired')
+        obj.loop();self.assertEqual(len(obj.samples),900);self.assertEqual(obj.errors,900)
+
+    def test_diagnostic_mismatch_rejected_before_phase(self):
+        l,h=helper();before=dict(main_pid=123,stats=dict(version='v0.1.0-preview.4',connected=1,sessions=2,drops=0,spoofed_drops=0,tx_datagrams=0,rx_datagrams=0,drop_reasons={},transport_profile='split-udp-v1'))
+        with tempfile.TemporaryDirectory() as tmp,patch.object(l,'inspect_link',return_value=before),patch.object(l,'stats',return_value=before['stats']),patch.object(S,'QueueDiagnostics') as obs,patch.object(h,'Services'),patch.object(S,'rpc',return_value={'suite':'dv-soak-v2'}),patch.object(S,'run_phase') as phase:
+            obs.return_value.close.return_value={'samples':[]}
+            a=argparse.Namespace(role='client',local='127.0.0.1',peer='127.0.0.1',instance='main',iface='wft0',output=tmp,queue_diagnostic=True,expect_version='v0.1.0-preview.4')
+            # Mock service counters are made JSON-serializable.
+            with patch.object(l,'write_report') as write:
+                result=S.run(a,live=l,helper=h)
+                self.assertEqual(result,1);phase.assert_not_called()
+                self.assertIn('same checker mode',write.call_args.args[2]['error'])
