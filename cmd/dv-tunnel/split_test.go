@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -426,5 +427,69 @@ func TestSplitRejectsLegacySilentFallback(t *testing.T) {
 	client.dial(ctx, &tls.Config{RootCAs: roots, ServerName: "webtcp.test", MinVersion: tls.VersionTLS12})
 	if upgraded.Load() != 2 || client.m.Sessions.Load() != 0 || client.m.Connected.Load() != 0 {
 		t.Fatal("legacy upgrade falsely accepted", upgraded.Load(), client.m.Sessions.Load())
+	}
+}
+
+// Simulate the TUN producer outrunning a runnable consumer on one scheduler P.
+// Same packet/byte bounds; a real blocked writer is covered separately.
+func TestDatagramQueueSingleYieldFairness(t *testing.T) {
+	old := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(old)
+	var baselineDrops uint64
+	for _, split := range []bool{false, true} {
+		cap := 32
+		if split {
+			cap = 64
+		} // split halves the same effective lane cap to 32
+		e := &engine{cfg: config{SplitUDP: split, QueuePackets: cap, QueueBytes: 262144}}
+		s := e.reserveLane(nil, context.Background(), true, nil)
+		ready, done := make(chan struct{}), make(chan struct{})
+		var received atomic.Uint64
+		go func() {
+			defer close(done)
+			close(ready)
+			for {
+				select {
+				case p := <-s.q:
+					s.took(p)
+					received.Add(1)
+				case <-s.ctx.Done():
+					return
+				}
+			}
+		}()
+		<-ready
+		for i := 0; i < 200; i++ {
+			s.enqueueMeta(tunFlow, ipPacket(17), 0, 0)
+		}
+		runtime.Gosched()
+		wait(t, func() bool { return received.Load()+e.m.DropReasons[dropQueuePackets].Load() == 200 })
+		drops := e.m.DropReasons[dropQueuePackets].Load()
+		s.cancel()
+		<-done
+		if split {
+			if drops >= baselineDrops || s.laneMetrics().retrySuccess.Load() == 0 || received.Load()+drops != 200 {
+				t.Fatalf("yield did not preserve bounded burst: drops=%d received=%d retries=%d", drops, received.Load(), s.laneMetrics().retrySuccess.Load())
+			}
+		} else {
+			baselineDrops = drops
+			if drops == 0 {
+				t.Fatal("fixture did not reproduce producer starvation")
+			}
+		}
+	}
+}
+func TestDatagramQueueYieldDoesNotWaitForBlockedWriter(t *testing.T) {
+	e := &engine{cfg: config{SplitUDP: true, QueuePackets: 2, QueueBytes: 4096}}
+	s := e.reserveLane(nil, context.Background(), true, nil)
+	defer s.cancel()
+	for i := 0; i < 10; i++ {
+		s.enqueueMeta(tunFlow, ipPacket(17), 0, 0)
+	}
+	if len(s.q) != 1 || s.qbytes.Load() != 40 || e.m.DropReasons[dropQueuePackets].Load() != 9 {
+		t.Fatal("bounded queue or byte accounting changed")
+	}
+	if s.laneMetrics().queueYields.Load() != 9 || s.laneMetrics().retrySuccess.Load() != 0 {
+		t.Fatal("unexpected retry accounting")
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -528,10 +529,28 @@ func (s *session) enqueueMeta(id uint64, p []byte, flags uint8, gso uint16) {
 	v := packet{id: id, data: append([]byte(nil), p...), at: time.Now(), flags: flags, gso: gso}
 	select {
 	case s.q <- v:
+		return
 	default:
-		s.qbytes.Add(-int64(len(p)))
-		s.drop(dropQueuePackets)
 	}
+	// A TUN reader can fill a short datagram queue before its runnable writer
+	// gets scheduled. Yield ONCE, only in the opt-in datagram lane. Never wait
+	// for socket progress or grow buffers: a blocked writer still causes drops.
+	if s.e.cfg.SplitUDP && s.dgram {
+		s.laneMetrics().queueYields.Add(1)
+		runtime.Gosched()
+		select {
+		case <-s.ctx.Done():
+			s.qbytes.Add(-int64(len(p)))
+			s.drop(dropCancelledSession)
+			return
+		case s.q <- v:
+			s.laneMetrics().retrySuccess.Add(1)
+			return
+		default:
+		}
+	}
+	s.qbytes.Add(-int64(len(p)))
+	s.drop(dropQueuePackets)
 }
 func (s *session) ingress(a *net.UDPAddr, p []byte) {
 	s.mu.Lock()

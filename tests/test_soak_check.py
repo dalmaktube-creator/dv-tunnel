@@ -68,7 +68,8 @@ class SoakTests(unittest.TestCase):
 
     def test_guard_stops_probe_and_invalid_bounds(self):
         stop=threading.Event();stop.set()
-        with self.assertRaisesRegex(RuntimeError,'Safety'):S.udp_probe('127.0.0.1',9,.2,100,stop)
+        r=S.udp_probe('127.0.0.1',9,.2,100,stop)
+        self.assertTrue(r['aborted']);self.assertIsNone(r['missing_by_deadline']);self.assertEqual(r['unreturned_at_stop'],0)
         for seconds,pps in ((121,200),(120,2000),(.2,2001),(0,1)):
             with self.assertRaises(ValueError):S.udp_probe('127.0.0.1',9,seconds,pps,threading.Event())
 
@@ -80,6 +81,23 @@ class SoakTests(unittest.TestCase):
             x=copy.deepcopy(r);x['udp_peer_initiated'][key]=val;self.assertFalse(S.phase_ok(x))
         r['tcp']['errors']=['TimeoutError'];self.assertFalse(S.phase_ok(r))
 
+    def test_even_one_carrier_drop_still_fails_phase_gate(self):
+        u=dict(pass_integrity=True,duplicates=0,per_flow_reordered=0,echo_rtt_ms=dict(p99=50),actual_offered_payload_mbps=1.92,requested_payload_mbps=1.92)
+        r=dict(tcp=dict(completed=1,errors=[]),udp_local_initiated=u,udp_peer_initiated=copy.deepcopy(u),peer_carrier_delta=dict(drops=0))
+        self.assertTrue(S.phase_gate(r,dict(drops=0),False))
+        self.assertFalse(S.phase_gate(r,dict(drops=1),False))
+        r['peer_carrier_delta']['drops']=1
+        self.assertFalse(S.phase_gate(r,dict(drops=0),False))
+
+    def test_expected_runtime_mismatch_opens_no_test_services(self):
+        l,h=helper()
+        before=dict(main_pid=1,stats=dict(version='v0.1.0-preview.3',connected=1))
+        with tempfile.TemporaryDirectory() as tmp,patch.object(l,'inspect_link',return_value=before),patch.object(h,'Services') as services:
+            args=argparse.Namespace(role='client',local='127.0.0.1',peer='127.0.0.1',instance='main',iface='unused',output=tmp,expect_version='v0.1.0-preview.4')
+            self.assertEqual(S.run(args,live=l,helper=h),1);services.assert_not_called()
+            d=json.loads((Path(tmp)/'latest-client.json').read_text())
+            self.assertIn('version',d['error']);self.assertEqual(d['status'],'failed')
+
     def test_monitor_detects_session_change(self):
         l,h=helper();args=argparse.Namespace(instance='main')
         start=dict(main_pid=1,stats=dict(sessions=2,transport_profile='split-udp-v1'))
@@ -90,10 +108,40 @@ class SoakTests(unittest.TestCase):
     def test_monitor_stops_on_queue_growth(self):
         l,h=helper();args=argparse.Namespace(instance='main')
         start=dict(main_pid=1,stats=dict(sessions=2,transport_profile='split-udp-v1',drop_reasons=dict(queue_packets=0)))
-        current=dict(start['stats'],drop_reasons=dict(queue_packets=1))
+        current=dict(start['stats'],drop_reasons=dict(queue_packets=64))
         with patch.object(l,'inspect_link',return_value=start),patch.object(l,'stats',return_value=current):
             stop=threading.Event();m=S.Monitor(l,args,stop);m.thread.join(1);m.close()
             self.assertTrue(stop.is_set());self.assertIn('queue',m.error);self.assertEqual(len(m.samples),1)
+
+    def test_small_queue_loss_is_recorded_but_does_not_abort_measurement(self):
+        l,h=helper();args=argparse.Namespace(instance='main')
+        start=dict(main_pid=1,stats=dict(sessions=2,transport_profile='split-udp-v1',drop_reasons=dict(queue_packets=0)))
+        current=dict(start['stats'],drop_reasons=dict(queue_packets=3))
+        with patch.object(l,'inspect_link',return_value=start),patch.object(l,'stats',return_value=current):
+            stop=threading.Event();m=S.Monitor(l,args,stop);time.sleep(.03);m.close()
+            self.assertFalse(stop.is_set());self.assertIsNone(m.error);self.assertGreaterEqual(len(m.samples),1)
+
+    def test_mid_probe_abort_keeps_counts_without_calling_unreturned_loss(self):
+        e=Echo();self.addCleanup(e.close);stop=threading.Event();captured=[]
+        timer=threading.Timer(.12,stop.set);timer.start()
+        try:r=S.udp_probe('127.0.0.1',e.port,1,200,stop,capture=captured.append)
+        finally:timer.cancel()
+        self.assertTrue(r['aborted']);self.assertFalse(r['pass_integrity']);self.assertGreater(r['sent'],0)
+        self.assertIsNone(r['missing_by_deadline']);self.assertEqual(r['unreturned_at_stop'],r['sent']-r['returned_unique'])
+        self.assertEqual(captured,[r])
+
+    def test_partial_phase_retains_tcp_results_when_peer_report_fails(self):
+        l,h=helper();args=argparse.Namespace(peer='127.0.0.1')
+        stop=threading.Event();progress={}
+        partial=dict(sent=4,returned_unique=3,missing_by_deadline=None,unreturned_at_stop=1,aborted=True,pass_integrity=False)
+        def probe(*args):
+            if len(args)>5 and args[5]:args[5](partial)
+            return partial
+        with patch.object(S,'rpc',side_effect=TimeoutError),patch.object(S,'udp_probe',side_effect=probe),patch.object(S,'transfer_worker',return_value=dict(completed=2,errors=[])):
+            r=S.run_phase(h,args,dict(id=1,seconds=.2,pps=100),stop,(1,2),progress)
+        self.assertTrue(stop.is_set());self.assertEqual(r['tcp']['completed'],8)
+        self.assertEqual(r['udp_local_initiated'],partial);self.assertIsNone(r['udp_peer_initiated'])
+        self.assertIn('TimeoutError',r['tcp']['errors']);self.assertFalse(S.phase_ok(r))
 
     def test_two_role_suite_without_carrier_or_config_access(self):
         l,h=helper();h.SIZE=4096;h.PAYLOAD=bytes(range(256))*16;h.HASH=hashlib.sha256(h.PAYLOAD).hexdigest()

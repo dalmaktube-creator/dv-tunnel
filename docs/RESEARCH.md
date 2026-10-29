@@ -92,3 +92,19 @@ Report JSON hashes:
 - turkey: 2af4f6df9d5441ef5c8531a677dab418fada29b4c32ec0c560ee0c557317788f
 
 Next gate: SOAK-CHECK.md; existing runtime remains unchanged.
+
+## First soak aborted: measurement not accepted
+
+During the first low-rate phase, Iran datagram-lane queue_packets increased by 3; Turkey queue drops increased by 0. No completed phases were saved. Both endpoints remained connected with stable session counters in sampled statistics; no final PID checkpoint was saved. These datagram-lane counters include UDP/ICMP, not a per-probe sequence mapping.
+
+No queue-byte or expiry drop increase was present. Host resource guard did not report the trigger: the Iran queue monitor stopped the test, then the peer aborted. Neither permanent wire loss nor a particular WAN mechanism is established. Incomplete application sent/received/TCP counters were discarded by checker v1, so a percentage or TCP-integrity verdict must NOT be invented.
+
+Source report JSON hashes:
+- iran: a32d3fb74407911bd45fd0df4192e4ec53d20ed81445feb71aa379b97de488e5
+- turkey: 678d9b405cc302a829b4a3015846f629cc974b5eca859e43179767cbee0fe76d
+
+Checker v2 corrects partial reporting and separates measurement termination from the zero-drop pass/escalation criterion. This is a checker change, not a claimed carrier fix. Details: SOAK-CHECK.md. Runtime queues and private settings remain unchanged.
+
+preview.4 evaluates one-shot datagram writer scheduling yield/retry, keeping the
+existing caps and budgets unchanged. This directly tests a bounded runnable-writer
+burst hypothesis, not larger buffers. See SPLIT-UDP.md; new field acceptance pending.

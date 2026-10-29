@@ -42,7 +42,7 @@ def packet(nonce,seq):
     return MAGIC+nonce+struct.pack('!I',seq)+bytes([seq%251])*1183
 
 
-def udp_probe(peer,port,seconds,pps,stop):
+def udp_probe(peer,port,seconds,pps,stop,capture=None):
     """Four sockets; bounded timestamp/seen arrays, no fsync or traces in hot path."""
     if not .05<=seconds<=120 or not 1<=pps<=2000:raise ValueError('Probe bounds')
     count=math.ceil(seconds*pps)
@@ -52,6 +52,22 @@ def udp_probe(peer,port,seconds,pps,stop):
     sel=selectors.DefaultSelector();socks=[]
     invalid=duplicates=reordered=sent=returned=send_blocked=0
     highest=[-1]*4;start=last_rx=time.monotonic();send_end=None
+    def summarize(aborted=False,error_type=None):
+        elapsed=max(0.000001,(send_end or time.monotonic())-start)
+        ordered=sorted(rtts)
+        def quantile(q):return round(ordered[max(0,math.ceil(len(ordered)*q)-1)],3) if ordered else None
+        result=dict(sent=sent,returned_unique=returned,
+                    missing_by_deadline=None if aborted else sent-returned,
+                    unreturned_at_stop=sent-returned if aborted else None,
+                    aborted=aborted,error_type=error_type,
+                    invalid=invalid,duplicates=duplicates,per_flow_reordered=reordered,
+                    requested_payload_mbps=pps*PAYLOAD_BYTES*8/1e6,
+                    actual_offered_payload_mbps=sent*PAYLOAD_BYTES*8/elapsed/1e6,
+                    offered_window_s=elapsed,send_would_block=send_blocked,
+                    echo_rtt_ms=dict(p50=quantile(.5),p95=quantile(.95),p99=quantile(.99),max=quantile(1)),
+                    pass_integrity=not aborted and sent==count and returned==count and invalid==0)
+        if capture:capture(result)
+        return result
     try:
         for _ in range(4):
             s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);socks.append(s)
@@ -92,16 +108,11 @@ def udp_probe(peer,port,seconds,pps,stop):
                     if seq<highest[flow]:reordered+=1
                     highest[flow]=max(highest[flow],seq)
                     rtts.append((received-sent_at[seq])*1000)
-        elapsed=send_end-start
-        ordered=sorted(rtts)
-        def quantile(q):return round(ordered[max(0,math.ceil(len(ordered)*q)-1)],3) if ordered else None
-        return dict(sent=sent,returned_unique=returned,missing_by_deadline=sent-returned,
-                    invalid=invalid,duplicates=duplicates,per_flow_reordered=reordered,
-                    requested_payload_mbps=pps*PAYLOAD_BYTES*8/1e6,
-                    actual_offered_payload_mbps=sent*PAYLOAD_BYTES*8/elapsed/1e6,
-                    offered_window_s=elapsed,send_would_block=send_blocked,
-                    echo_rtt_ms=dict(p50=quantile(.5),p95=quantile(.95),p99=quantile(.99),max=quantile(1)),
-                    pass_integrity=sent==count and returned==count and invalid==0)
+        return summarize()
+    except (Exception,KeyboardInterrupt) as exc:
+        result=summarize(True,type(exc).__name__)
+        stop.set()
+        return result
     finally:
         sel.close()
         for s in socks:s.close()
@@ -110,11 +121,17 @@ def udp_probe(peer,port,seconds,pps,stop):
 def phase_ok(result):
     probes=[result['udp_local_initiated'],result['udp_peer_initiated']]
     if result['tcp']['errors'] or result['tcp']['completed']<1:return False
+    if any(not isinstance(p,dict) or p.get('aborted') for p in probes):return False
     for p in probes:
         if not p['pass_integrity'] or p['duplicates'] or p['per_flow_reordered']:return False
         if p['echo_rtt_ms']['p99'] is None or p['echo_rtt_ms']['p99']>500:return False
         if p['actual_offered_payload_mbps']<p['requested_payload_mbps']*.9:return False
     return True
+
+
+def phase_gate(result,local_delta,stopped):
+    return (not stopped and phase_ok(result) and local_delta.get('drops')==0
+            and (result.get('peer_carrier_delta') or {}).get('drops')==0)
 
 
 class Monitor:
@@ -129,8 +146,10 @@ class Monitor:
                 d=self.live.stats(self.args.instance)
                 with self.lock:self.samples.append(dict(monotonic=time.monotonic(),utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),stats=d))
                 baseline=self.initial['stats'].get('drop_reasons',{})
-                if any(d.get('drop_reasons',{}).get(k,0)>baseline.get(k,0) for k in ('queue_packets','queue_bytes','queue_expired')):
-                    raise RuntimeError('Carrier queue drop increased')
+                packet_drops=d.get('drop_reasons',{}).get('queue_packets',0)-baseline.get('queue_packets',0)
+                if packet_drops>=64 or any(d.get('drop_reasons',{}).get(k,0)>baseline.get(k,0) for k in ('queue_bytes','queue_expired')):
+                    raise RuntimeError('Carrier queue hard-stop: >=64 packet drops or byte/expiry drop')
+                if d.get('version')!=self.initial['stats'].get('version'):raise RuntimeError('Carrier version changed')
                 if d.get('transport_profile')!='split-udp-v1' or d.get('sessions')!=self.initial['stats']['sessions']:
                     raise RuntimeError('Carrier session or profile changed during test')
                 if tick%5==0 and self.live.inspect_link(self.args)['main_pid']!=self.initial['main_pid']:
@@ -151,7 +170,7 @@ def make_handler(h):
         def handle(self):
             self.request.settimeout(15);o=self.server.owner
             obj=h.recv_json(self.request);op=obj.get('op')
-            if op=='ping':h.send_json(self.request,dict(ok=True,suite='dv-soak-v1'));return
+            if op=='ping':h.send_json(self.request,dict(ok=True,suite='dv-soak-v2',version=o.initial['stats'].get('version')));return
             if op=='transfer':
                 data=h.read_exact(self.request,h.SIZE)
                 if data!=h.PAYLOAD:raise ValueError('Upload integrity failure')
@@ -167,11 +186,11 @@ def make_handler(h):
                 self.request.settimeout(spec['seconds']+20)
                 try:
                     before=o.live.inspect_link(o.args)
-                    result=udp_probe(o.peer,o.peer_udp_port,spec['seconds'],spec['pps'],o.stop)
+                    result=udp_probe(o.peer,o.peer_udp_port,spec['seconds'],spec['pps'],o.stop,capture=lambda r:o.partial_probes.__setitem__(str(ident),r))
                     checkpoint=o.live.inspect_link(o.args)
                     answer=dict(id=ident,udp=result,carrier_checkpoint=checkpoint,carrier_delta=o.live.deltas(before['stats'],checkpoint['stats']))
                 except Exception as e:
-                    o.stop.set();answer=dict(id=ident,error_type=type(e).__name__)
+                    o.stop.set();answer=dict(id=ident,error_type=type(e).__name__,udp=o.partial_probes.get(str(ident)))
                 with o.lock:o.phase_results.append(answer)
                 h.send_json(self.request,answer);return
             if op=='finish':
@@ -197,25 +216,39 @@ def transfer_worker(h,peer,port,pacer,stop,end):
     return dict(completed=completed,errors=errors)
 
 
-def run_phase(h,args,spec,stop,ports):
+def run_phase(h,args,spec,stop,ports,progress=None):
+    progress=progress if progress is not None else {}
     tcp,udp=ports;start=time.monotonic();end=start+spec['seconds'];pacer=h.Pacer(mbps=2)
+    def captured(result):progress['udp_local_initiated']=result
+    errors=[];a=b=None;tcp_results=[]
     with cf.ThreadPoolExecutor(max_workers=6) as pool:
         reverse=pool.submit(rpc,h,args.peer,tcp,dict(op='soak_phase',id=spec['id']),spec['seconds']+20)
-        local=pool.submit(udp_probe,args.peer,udp,spec['seconds'],spec['pps'],stop)
+        local=pool.submit(udp_probe,args.peer,udp,spec['seconds'],spec['pps'],stop,captured)
         workers=[pool.submit(transfer_worker,h,args.peer,tcp,pacer,stop,end) for _ in range(4)]
         try:
-            a=local.result(timeout=spec['seconds']+15);b=reverse.result(timeout=spec['seconds']+20)
-            if 'udp' not in b:raise RuntimeError('Peer phase failed')
-        except BaseException:stop.set();raise
-        tcp_results=[x.result(timeout=15) for x in workers]
+            a=local.result(timeout=spec['seconds']+15)
+            b=reverse.result(timeout=spec['seconds']+20)
+            if not isinstance(b.get('udp'),dict):raise RuntimeError('Peer phase summary unavailable')
+        except (Exception,KeyboardInterrupt) as exc:
+            stop.set();errors.append(type(exc).__name__)
+        finally:
+            for worker in workers:
+                try:tcp_results.append(worker.result(timeout=15))
+                except (Exception,KeyboardInterrupt) as exc:
+                    stop.set();errors.append(type(exc).__name__)
     completed=sum(x['completed'] for x in tcp_results)
-    return dict(spec=spec,tcp=dict(completed=completed,errors=[e for x in tcp_results for e in x['errors']],
-                upload_bytes=completed*h.SIZE,download_bytes=completed*h.SIZE),
-                udp_local_initiated=a,udp_peer_initiated=b['udp'],peer_checkpoint=b['carrier_checkpoint'],peer_carrier_delta=b['carrier_delta'],elapsed_s=time.monotonic()-start)
+    progress.update(spec=spec,tcp=dict(completed=completed,errors=errors+[e for x in tcp_results for e in x['errors']],
+                    upload_bytes=completed*h.SIZE,download_bytes=completed*h.SIZE),
+                    udp_local_initiated=a or progress.get('udp_local_initiated'),
+                    udp_peer_initiated=b.get('udp') if b else None,
+                    peer_checkpoint=b.get('carrier_checkpoint') if b else None,
+                    peer_carrier_delta=b.get('carrier_delta') if b else None,
+                    elapsed_s=time.monotonic()-start)
+    return dict(progress)
 
 
 def run(args,live=None,helper=None,phases=None,ports=None):
-    os.umask(0o077);report=dict(suite='dv-soak-v1',role=args.role,status='failed',started_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
+    os.umask(0o077);report=dict(suite='dv-soak-v2',role=args.role,status='failed',started_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
         notes=['Only existing test link; no carrier/service/config/firewall/routes changed.',
                'Four TCP workers, aggregate 2 Mbps payload pacer at each endpoint, overlap both initiating UDP directions.',
                'UDP echo return adds load; requested payload rate is per initiating sender, not total wire traffic.',
@@ -223,17 +256,22 @@ def run(args,live=None,helper=None,phases=None,ports=None):
                'UDP missing is after up to five-second final drain; not proven permanent wire loss.',
                'RTT includes host scheduling; no one-way jitter claim.',
                'Statistics sampled once per second; runtime publishes every two seconds, so samples may repeat and can miss brief transients.',
-               'Escalation stops for delivery/integrity/reordering, p99>500ms, achieved rate<90%, carrier queue drops, session/PID change or host guard.',
+               'Any carrier drop still fails the phase and blocks escalation; immediate queue hard-stop is >=64 new packet drops or any byte/expiry drop.',
+               'Other immediate guards and phase gates remain: host limits, session/PID/profile change, no echo, integrity/reordering, p99>500ms, achieved rate<90%.',
+               'Aborted probes use unreturned_at_stop, NOT missing_by_deadline, because the final drain did not complete.',
                'Whole-host CPU85% twice/memory192MiB guards reduce risk, not zero production-impact guarantee.'])
     guard=services=monitor=None;live=live or load_live();h=helper or live.load_helper();specs=phases or PHASES
     args.expect_profile='split-udp-v1'
     try:
-        report['before']=live.inspect_link(args);guard=h.HostGuard();monitor=Monitor(live,args,guard.stop)
+        report['before']=live.inspect_link(args)
+        expected=getattr(args,'expect_version',None)
+        if expected and report['before']['stats'].get('version')!=expected:raise RuntimeError('Installed carrier version does not match experiment')
+        guard=h.HostGuard();monitor=Monitor(live,args,guard.stop)
         h.Handler=make_handler(h)
         tl,ul,tp,up=ports or (h.TCP_PORT,h.UDP_PORT,h.TCP_PORT,h.UDP_PORT)
         services=h.Services(args.local,args.peer,tcp_port=tl,udp_port=ul,peer_udp_port=up,allow_reconnect=False)
         services.stop=guard.stop;services.live=live;services.args=args;services.initial=report['before']
-        services.phase_lock=threading.Lock();services.next_phase=1;services.phase_specs=specs;services.phase_results=[]
+        services.phase_lock=threading.Lock();services.next_phase=1;services.phase_specs=specs;services.phase_results=[];services.partial_probes={}
         report['phases']=[]
         if args.role=='server':
             print('SOAK_SERVER_READY — now run Iran; leave this terminal open',flush=True)
@@ -245,17 +283,21 @@ def run(args,live=None,helper=None,phases=None,ports=None):
             with services.lock:report['phases']=list(services.phase_results)
             report['status']='completed';report['tcp_transfers_served']=services.transfers
         else:
-            rpc(h,args.peer,tp,dict(op='ping'))
+            greeting=rpc(h,args.peer,tp,dict(op='ping'))
+            if greeting.get('suite')!='dv-soak-v2':raise RuntimeError('Both endpoints must run checker v2')
+            if expected and greeting.get('version')!=expected:raise RuntimeError('Peer carrier version does not match experiment')
             for spec in specs:
                 print('PHASE',spec['id'],'seconds',spec['seconds'],'UDP Mbps per initiator',spec['pps']*.0096,flush=True)
                 before=live.inspect_link(args)
-                result=run_phase(h,args,spec,guard.stop,(tp,up))
+                report['current_phase']=dict(spec=spec)
+                result=run_phase(h,args,spec,guard.stop,(tp,up),report['current_phase'])
+                report['phases'].append(result)
                 time.sleep(2.2);after=live.inspect_link(args)
                 result['carrier_delta']=live.deltas(before['stats'],after['stats'])
-                passed=phase_ok(result) and result['carrier_delta']['drops']==0 and result['peer_carrier_delta']['drops']==0 and not guard.stop.is_set()
-                result['gate_passed']=passed;report['phases'].append(result)
+                passed=phase_gate(result,result['carrier_delta'],guard.stop.is_set())
+                result['gate_passed']=passed
                 print('PHASE_RESULT',spec['id'],'PASS' if passed else 'STOP',
-                      'UDP missing:',result['udp_local_initiated']['missing_by_deadline'],result['udp_peer_initiated']['missing_by_deadline'],flush=True)
+                      'UDP missing:',(result.get('udp_local_initiated') or {}).get('missing_by_deadline'),(result.get('udp_peer_initiated') or {}).get('missing_by_deadline'),flush=True)
                 if not passed:break
             report['peer_finish']=rpc(h,args.peer,tp,dict(op='finish'))
             report['status']='passed' if len(report['phases'])==len(specs) and all(p['gate_passed'] for p in report['phases']) else 'stopped_at_quality_gate'
@@ -272,8 +314,19 @@ def run(args,live=None,helper=None,phases=None,ports=None):
         if isinstance(e,(ValueError,RuntimeError,TimeoutError)):report['error']=str(e)[:200]
     finally:
         if monitor:
+            try:
+                report['after']=live.inspect_link(args)
+                report['carrier_counter_deltas']=live.deltas(report['before']['stats'],report['after']['stats'])
+                report['carrier_main_pid_unchanged']=report['after']['main_pid']==report['before']['main_pid']
+            except Exception as exc:report['after_error_type']=type(exc).__name__
             monitor.close();report['samples']=monitor.samples;report['monitor_error']=monitor.error
-        if services:services.close();report['test_socket_cleanup']='OK'
+        if services:
+            services.close();report['test_socket_cleanup']='OK'
+            with services.lock:
+                report['served_tcp_transfers']=services.transfers
+                report['handler_errors']=services.handler_errors
+                report['server_phase_results']=list(services.phase_results)
+                report['udp_probe_summaries']=dict(services.partial_probes)
         if guard:
             guard.close();report['host']=dict(cpu_max_sample_pct=guard.cpu_max,mem_available_min_sample_mib=guard.mem_min,stop_reason=guard.reason)
         report['finished_utc']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
@@ -283,7 +336,7 @@ def run(args,live=None,helper=None,phases=None,ports=None):
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('role',choices=['server','client'])
-    ap.add_argument('--instance',default='main');ap.add_argument('--iface',default='wft0')
+    ap.add_argument('--expect-version');ap.add_argument('--instance',default='main');ap.add_argument('--iface',default='wft0')
     ap.add_argument('--local');ap.add_argument('--peer');ap.add_argument('--output',default='/root/dv-soak-results')
     args=ap.parse_args();args.local=args.local or ('10.254.253.2' if args.role=='server' else '10.254.253.1');args.peer=args.peer or ('10.254.253.1' if args.role=='server' else '10.254.253.2')
     signal.signal(signal.SIGTERM,lambda s,f:(_ for _ in ()).throw(KeyboardInterrupt()))

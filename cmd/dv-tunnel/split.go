@@ -84,11 +84,13 @@ func (e *engine) negotiate(r *http.Request) (bool, http.Header, error) {
 }
 
 type laneMetrics struct {
-	drops      [dropReasonCount]atomic.Uint64
-	sent       atomic.Uint64
-	received   atomic.Uint64
-	maxWriteUS atomic.Uint64
-	slowWrites atomic.Uint64
+	queueYields  atomic.Uint64
+	retrySuccess atomic.Uint64
+	drops        [dropReasonCount]atomic.Uint64
+	sent         atomic.Uint64
+	received     atomic.Uint64
+	maxWriteUS   atomic.Uint64
+	slowWrites   atomic.Uint64
 }
 
 func (s *session) laneMetrics() *laneMetrics {
@@ -132,7 +134,7 @@ func (e *engine) snapshot() map[string]interface{} {
 		for j, name := range dropNames {
 			reasons[name] = m.drops[j].Load()
 		}
-		info := map[string]interface{}{"connected": false, "tx_datagrams": m.sent.Load(), "rx_datagrams": m.received.Load(), "drop_reasons": reasons, "max_write_us": m.maxWriteUS.Load(), "writes_over_100ms": m.slowWrites.Load()}
+		info := map[string]interface{}{"connected": false, "tx_datagrams": m.sent.Load(), "rx_datagrams": m.received.Load(), "drop_reasons": reasons, "queue_yields": m.queueYields.Load(), "queue_retry_success": m.retrySuccess.Load(), "max_write_us": m.maxWriteUS.Load(), "writes_over_100ms": m.slowWrites.Load()}
 		if s != nil && s.q != nil {
 			info["connected"] = s.ctx.Err() == nil
 			info["queued_packets"] = len(s.q)

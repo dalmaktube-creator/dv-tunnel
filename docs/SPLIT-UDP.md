@@ -75,3 +75,33 @@ Prepublication local checks: 23 Go test functions passed under the race detector
 with three repetitions; go vet passed; 52 Python tests passed; Linux amd64/arm64
 built. The preview.2 updater accepted the exact seven-member preview.3 amd64
 package locally. New real-server mixed traffic acceptance is still pending.
+
+## preview.4: one-shot datagram writer scheduling opportunity
+
+The first longer field test on preview.3 observed three datagram-lane packet-cap
+drops on Iran, no byte/expiry drops, before checker v1 aborted. This suggests
+checking short producer/writer scheduling bursts; it does NOT establish the WAN
+cause or that all three counted packets belonged to the probe.
+
+On a full datagram-lane packet channel, preview.4 yields to the Go scheduler ONCE,
+then makes ONE nonblocking enqueue attempt before dropping. No sleep, retry loop,
+wait for network progress or buffer expansion. TCP/bulk and legacy mode are
+unchanged. Packet/byte/age caps remain identical. A genuinely stalled writer still
+fills its bounded queue and drops. Byte-cap rejection is unchanged.
+
+Safe lane counters queue_yields and queue_retry_success record this path; a
+successful retry means the packet entered the local queue, NOT proof of delivery.
+Synthetic single-scheduler-P tests reproduce producer starvation with equal
+32-slot queues, show the one-shot retry lets a runnable consumer drain, and
+separately verify no-consumer queues still drop with correct byte accounting.
+Race checks and existing lane isolation/reconnect tests remain required.
+
+This is a narrowly scoped independent experiment, NOT a claimed field fix.
+The corrected soak checker v2 preserves abort data and keeps zero-drop phase
+acceptance. Explicit --expect-version can require matching preview.4 at both ends.
+Normal manager rollback to preview.3 remains compatible with split metadata/wire.
+
+The single yield is best-effort: the scheduler need not choose the writer next.
+A local synthetic run can still drop, so the regression test checks reduced drops
+against the same-capacity baseline and reconciles received+dropped, not a universal
+zero-drop promise. Actual zero-drop field acceptance remains a separate gate.
