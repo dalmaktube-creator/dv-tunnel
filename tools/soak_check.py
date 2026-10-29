@@ -93,12 +93,30 @@ def resolve_carrier_pid(service_pid):
     return found[0]
 
 
+def cpu_snapshot(identities):
+    """Numeric fixed-PID counters only; no argv, environment or process scan."""
+    lines=Path('/proc/stat').read_text().splitlines()
+    ticks=[int(x) for x in lines[0].split()[1:9]]
+    if len(ticks)!=8 or min(ticks)<0:raise ValueError('Invalid host CPU counters')
+    result=dict(host_ticks=dict(zip(('user','nice','system','idle','iowait','irq','softirq','steal'),ticks)),
+                logical_cpus=sum(bool(re.fullmatch(r'cpu\d+ .*',x)) for x in lines),processes={})
+    for label,(pid,identity) in identities.items():
+        text=(Path('/proc')/str(pid)/'stat').read_text()
+        if len(text)>8192:raise ValueError('Process stat too large')
+        f=text.rsplit(')',1)[1].split()
+        if (int(f[1]),int(f[19]))!=identity:raise RuntimeError('CPU observation PID identity changed')
+        result['processes'][label]=dict(pid=pid,start_ticks=int(f[19]),user_ticks=int(f[11]),system_ticks=int(f[12]),threads=int(f[17]))
+    return result
+
+
 class QueueDiagnostics:
     def __init__(self,pid,iface):
         if not isinstance(pid,int) or pid<=0 or not re.fullmatch(r'[a-zA-Z0-9_-]{1,15}',iface):raise ValueError('Diagnostic identity invalid')
         self.service_pid=pid;self.pid=resolve_carrier_pid(pid);self.identity=process_identity(self.pid);self.iface=iface;self.ss=shutil.which('ss')
         if not self.ss:raise RuntimeError('ss is required for queue diagnostics')
         self.samples=[];self.done=threading.Event();self.errors=0;self.thread=None;self.load_stop=None;self.safety_stop_reason=None;self.kernel_initial=None
+        self.cpu_ids={label:(p,process_identity(p)) for label,p in [('checker',os.getpid()),('runner',self.service_pid),('carrier',self.pid)]}
+        self.clock_ticks=os.sysconf('SC_CLK_TCK')
         first=self.sample()
         if 'error_type' in first or len(first.get('tcp_sockets',[]))!=2:raise RuntimeError('Expected two established carrier-owned TCP sockets on port 42443')
         self.kernel_initial=first.get('tun_kernel')
@@ -115,6 +133,7 @@ class QueueDiagnostics:
             for key in ('rx_packets','tx_packets','rx_dropped','tx_dropped','rx_errors','tx_errors'):
                 kernel[key]=int((Path('/sys/class/net')/self.iface/'statistics'/key).read_text())
             result['tun_kernel']=kernel
+            if getattr(self,'cpu_ids',None):result['cpu']=cpu_snapshot(self.cpu_ids)
         except Exception as exc:result['error_type']=type(exc).__name__
         return result
     def loop(self):
@@ -130,13 +149,16 @@ class QueueDiagnostics:
         self.done.set()
         if self.thread:self.thread.join(2)
         return dict(kind='carrier-owned-tcp-and-tun-v1',sample_interval_s=.5,max_samples=900,
-                    service_pid=self.service_pid,socket_pid=self.pid,samples=self.samples,observation_errors=self.errors,safety_stop_reason=self.safety_stop_reason,
+                    service_pid=self.service_pid,socket_pid=self.pid,cpu_clock_ticks_per_second=getattr(self,'clock_ticks',None),samples=self.samples,observation_errors=self.errors,safety_stop_reason=self.safety_stop_reason,
                     sample_cap_reached=len(self.samples)>=900,
                     notes=['Service MainPID is the Python runner; socket PID is its unique dv-tunnel child verified by PPid, cgroup and kernel start ticks. Numeric ss fields only, established sockets on TCP port 42443.',
                            'FD identifies a local socket only; not a proven UDP/TCP lane mapping. FD can be reused after reconnect.',
                            'Socket counters are cumulative: compare same socket over time, not endpoint totals.',
                            'Half-second polling can miss short stalls; no causal WAN or loss attribution from a correlation alone.',
-                           'TUN kernel counters are interface-wide, not probe sequence counters. Sampling itself has some overhead.'])
+                           'TUN kernel counters are interface-wide, not probe sequence counters. Sampling itself has some overhead.',
+                           'CPU fields are cumulative numeric ticks for this checker, runner and carrier only, identity-checked. No production process inventory.',
+                           'Host busy guard includes steal time. Separate host user/system/irq/softirq/steal deltas before attributing CPU to the carrier.',
+                           'Process CPU: delta(user_ticks+system_ticks)/clock_ticks/elapsed_seconds*100 is one-core percent, not whole-host percent. Logical CPU count is recorded; do not mix denominators.'])
 
 
 def packet(nonce,seq):
@@ -378,9 +400,17 @@ def run(args,live=None,helper=None,phases=None,ports=None):
         if expected_packets is not None and (not 1<=expected_packets<=128 or any(report['before']['stats'].get('lanes',{}).get(k,{}).get('packet_limit')!=expected_packets for k in ('tcp','udp'))):raise RuntimeError('Local lane packet cap does not match experiment')
         expected_wait=getattr(args,'expect_udp_wait_ms',None)
         if expected_wait is not None and (not 0<=expected_wait<=200 or report['before']['stats'].get('lanes',{}).get('udp',{}).get('queue_wait_ms')!=expected_wait):raise RuntimeError('Local UDP wait does not match experiment')
+        baseline=getattr(args,'cpu_baseline_seconds',0)
+        if not 0<=baseline<=30 or (baseline and not diagnostic):raise ValueError('CPU baseline needs queue diagnostic and 0..30 seconds')
         if diagnostic:observer=QueueDiagnostics(report['before']['main_pid'],args.iface)
         guard=h.HostGuard();monitor=Monitor(live,args,guard.stop)
         if observer:observer.load_stop=guard.stop
+        if baseline:
+            report['cpu_baseline']=dict(start_monotonic=time.monotonic(),requested_seconds=baseline)
+            print('CPU_BASELINE — no test load; safety guards remain active',flush=True)
+            stopped=guard.stop.wait(baseline)
+            report['cpu_baseline']['end_monotonic']=time.monotonic()
+            if stopped:raise RuntimeError(monitor.error or guard.reason or 'Baseline safety stop')
         h.Handler=make_handler(h)
         tl,ul,tp,up=ports or (h.TCP_PORT,h.UDP_PORT,h.TCP_PORT,h.UDP_PORT)
         services=h.Services(args.local,args.peer,tcp_port=tl,udp_port=ul,peer_udp_port=up,allow_reconnect=False)
@@ -457,6 +487,7 @@ def run(args,live=None,helper=None,phases=None,ports=None):
 def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('role',choices=['server','client'])
     ap.add_argument('--queue-diagnostic',action='store_true',help='One 30s 4.8Mbps phase with read-only carrier-owned TCP and TUN counters; no tuning or carrier changes');ap.add_argument('--expect-version');ap.add_argument('--expect-lane-packets',type=int);ap.add_argument('--expect-udp-wait-ms',type=int);ap.add_argument('--instance',default='main');ap.add_argument('--iface',default='wft0')
+    ap.add_argument('--cpu-baseline-seconds',type=int,default=0,help='0..30 seconds without test load before services; queue diagnostic only; safety guards unchanged')
     ap.add_argument('--local');ap.add_argument('--peer');ap.add_argument('--output')
     args=ap.parse_args();args.output=args.output or ('/root/dv-queue-diag-results' if args.queue_diagnostic else '/root/dv-soak-results');args.local=args.local or ('10.254.253.2' if args.role=='server' else '10.254.253.1');args.peer=args.peer or ('10.254.253.1' if args.role=='server' else '10.254.253.2')
     signal.signal(signal.SIGTERM,lambda s,f:(_ for _ in ()).throw(KeyboardInterrupt()))

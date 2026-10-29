@@ -194,6 +194,32 @@ class SoakTests(unittest.TestCase):
         saved=json.dumps(result)
         for forbidden in ['31.40','87.107','secret','unrelated','Mbps']:self.assertNotIn(forbidden,saved)
 
+    def test_cpu_baseline_guard_stops_before_test_services(self):
+        from types import SimpleNamespace
+        l,h=helper();stop=threading.Event();stop.set()
+        guard=SimpleNamespace(stop=stop,reason='host_cpu_85pct_twice',cpu_max=91,mem_min=400,close=lambda:None)
+        monitor=SimpleNamespace(error=None,samples=[],close=lambda:None)
+        before=dict(main_pid=123,stats=dict(version='v0.1.0-preview.6',connected=1,sessions=2,transport_profile='split-udp-v1'))
+        with tempfile.TemporaryDirectory() as tmp,patch.object(l,'inspect_link',return_value=before),patch.object(l,'deltas',return_value={'drops':0}),patch.object(h,'HostGuard',return_value=guard),patch.object(S,'Monitor',return_value=monitor),patch.object(S,'QueueDiagnostics') as obs,patch.object(h,'Services') as service,patch.object(l,'write_report') as write:
+            obs.return_value.close.return_value={'samples':[]}
+            a=argparse.Namespace(role='server',local='127.0.0.1',peer='127.0.0.1',instance='main',iface='wft0',output=tmp,queue_diagnostic=True,cpu_baseline_seconds=10)
+            self.assertEqual(S.run(a,live=l,helper=h),1);service.assert_not_called()
+            report=write.call_args.args[2];self.assertEqual(report['error'],'host_cpu_85pct_twice');self.assertIn('end_monotonic',report['cpu_baseline'])
+
+    def test_cpu_snapshot_numeric_fixed_pids_and_steal(self):
+        fields=['S']+['0']*23
+        for i,v in {1:100,11:25,12:5,17:4,19:999}.items():fields[i]=str(v)
+        def read(path,*a,**kw):
+            if str(path)=='/proc/stat':return 'cpu 10 1 20 30 4 5 6 70 99 99\ncpu0 0\ncpu1 0\n'
+            if str(path)=='/proc/123/stat':return '123 (private name ) has spaces) '+' '.join(fields)
+            raise AssertionError('Unexpected read '+str(path))
+        with patch.object(Path,'read_text',read):
+            result=S.cpu_snapshot({'carrier':(123,(100,999))})
+            self.assertEqual(result['host_ticks']['steal'],70);self.assertEqual(sum(result['host_ticks'].values()),146)
+            self.assertEqual(result['logical_cpus'],2);self.assertEqual(result['processes']['carrier']['user_ticks'],25)
+            self.assertNotIn('private',json.dumps(result))
+            with self.assertRaisesRegex(RuntimeError,'identity'):S.cpu_snapshot({'carrier':(123,(100,998))})
+
     def test_diagnostic_sampling_is_read_only_fixed_argv(self):
         from types import SimpleNamespace
         obj=S.QueueDiagnostics.__new__(S.QueueDiagnostics);obj.ss='/usr/bin/ss';obj.pid=123;obj.identity=(100,234);obj.iface='wft0'

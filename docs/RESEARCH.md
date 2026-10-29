@@ -215,3 +215,35 @@ original packet caps; permit one bounded admission deadline rather than enlarge
 buffers again. The shared TUN reader can propagate backpressure and latency, so
 application delivery/latency gates and added kernel-counter checks are required.
 No preview.6 field result or performance improvement is claimed yet.
+
+
+## Preview.6 bounded-wait trial — stopped by host CPU guard
+
+Both nodes verified preview.6, 32 slots / 131072 bytes per lane, UDP wait 200 ms.
+The intended 30-second / 4.8 Mbps-per-initiator mixed phase aborted after about
+14 seconds on the client clock. Turkey reported host_cpu_85pct_twice and a
+91% maximum whole-host CPU sample. Iran's later ConnectionRefusedError reflects
+the stopped peer test service, not demonstrated carrier failure.
+
+No new carrier drops at either endpoint; no increase in sampled TUN drop/error
+counters; observation errors zero. Both PID/session snapshots were unchanged
+and cleanup OK. However, queue_waits stayed ZERO at both nodes. The admission
+wait was configured but never exercised: this run does not establish its benefit
+or fix the previous congestion failure. Different WAN/host conditions can matter.
+
+Partial unreturned-at-stop: 294 Iran-initiated, 25 Turkey-initiated; final
+missing_by_deadline is null in both. These are not final loss rates. Five TCP
+transactions completed before abort; later resets/EOF are not corruption proof.
+No completed quality/capacity pass or higher-rate acceptance was obtained.
+
+The host guard measures total minus idle+iowait across the first eight /proc/stat
+CPU fields, including steal. It cannot attribute usage to Go, Python test load,
+production services or VM contention. Do not raise/disable it to finish the test.
+Next: numeric fixed-PID CPU sampling (checker, runner, carrier), separate host
+user/system/IRQ/softIRQ/steal counters and a guarded no-test-load baseline. No
+production process listing, config, cmdline or environment capture. Runtime and
+queue settings remain unchanged; only the checker is changed.
+
+Original uploaded report.json SHA256:
+- iran: 81aeb72f410155ccf0cfc8263d06fa287596090f6760f79e9c0e8c83f0c4a5da
+- turkey: d3a92d6dd10040078710d6233c4e681f7f3ceab7bc49fff1a0170393c4f7f0c6
