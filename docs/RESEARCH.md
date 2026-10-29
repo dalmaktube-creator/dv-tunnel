@@ -247,3 +247,45 @@ queue settings remain unchanged; only the checker is changed.
 Original uploaded report.json SHA256:
 - iran: 81aeb72f410155ccf0cfc8263d06fa287596090f6760f79e9c0e8c83f0c4a5da
 - turkey: d3a92d6dd10040078710d6233c4e681f7f3ceab7bc49fff1a0170393c4f7f0c6
+
+
+## Preview.6 CPU-attribution run — host guard still stops mixed load
+
+The planned 30-second mixed phase aborted around 27.73 seconds on the client
+clock. Turkey reported host_cpu_85pct_twice again; maximum guard sample about
+90.91%. No new carrier drops or sampled TUN drop/error counter increases at
+either endpoint; PIDs and session snapshots unchanged; cleanup OK. Fourteen TCP
+transactions completed before abort. Partial UDP unreturned-at-stop counts:
+546 Iran-initiated, 23 Turkey-initiated; missing_by_deadline null, not final loss.
+
+This time wait was actually exercised: one new admission wait and success on
+each endpoint, zero wait timeouts. New maxima were 76897 us Iran / 58843 us
+Turkey. This establishes a finite admission recovered in each run, not a
+completed end-to-end quality pass or causal improvement against earlier runs.
+
+Turkey reports one logical CPU. In adjacent observation intervals with host
+busy >=85%, the aggregate host-normalized carrier CPU share was approximately
+21.57% and checker process share 16.86%. The runner had no
+measured CPU increase. The remaining busy ticks cannot be assigned to a named
+production service: they include unobserved processes, kernel work, VM steal,
+and possibly checker subprocesses. These half-second intervals are not the
+exact same windows as the one-second guard, and process/host reads are not atomic.
+
+Post-baseline aggregates include waiting/load/cleanup, not a pure active-load
+benchmark. Whole-host busy was about 62.94%, carrier 22.28%, checker 15.75%;
+baseline busy about 14.65%. Do not describe these as tunnel-only CPU or capacity.
+Iran has two logical CPUs; do not compare raw one-core process percentages
+against host-normalized percentages. Host memory guard did not trigger.
+
+A gap in the diagnostic: reaped ss/systemctl/etc subprocess CPU was not recorded
+in the previous report. Periodic ss -p can perform process-FD discovery even
+though returned sockets are filtered. Its actual contribution is NOT proven by
+these reports. Next diagnostic removes periodic ss observations, after the same
+owned-socket preflight, and records aggregate reaped-child CPU. CPU/TUN polling,
+synthetic traffic, phase duration, all integrity gates and safety thresholds
+remain unchanged. No production service is paused and no carrier update made.
+See [lean observer trial](LEAN-OBSERVER.md).
+
+Original uploaded report.json SHA256:
+- iran: f3b748a3831361b12f9b91f126859fbb0f16ce32e22ca7b99f9af124b1a73424
+- turkey: 4ad8bd3a486ba06677384a594d257b313e3d382c9a14b071b351fc93d16dbde3

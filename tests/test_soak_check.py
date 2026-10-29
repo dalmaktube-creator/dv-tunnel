@@ -220,6 +220,16 @@ class SoakTests(unittest.TestCase):
             self.assertNotIn('private',json.dumps(result))
             with self.assertRaisesRegex(RuntimeError,'identity'):S.cpu_snapshot({'carrier':(123,(100,998))})
 
+    def test_lean_observer_preserves_preflight_but_skips_periodic_ss(self):
+        from types import SimpleNamespace
+        obj=S.QueueDiagnostics.__new__(S.QueueDiagnostics);obj.ss='/usr/bin/ss';obj.pid=123;obj.identity=(100,234);obj.iface='wft0';obj.lean=True;obj.samples=[]
+        output='ESTAB 0 0 A:42443 B:1 users:(("dv-tunnel",pid=123,fd=6))\n    cubic rtt:50/2\n'
+        with patch.object(S,'process_identity',return_value=(100,234)),patch.object(S.subprocess,'run',return_value=SimpleNamespace(stdout=output)) as run,patch.object(Path,'read_text',return_value='0'),patch.object(S.resource,'getrusage',return_value=SimpleNamespace(ru_utime=1.0,ru_stime=.5)):
+            first=obj.sample();self.assertEqual(len(first['tcp_sockets']),1);obj.samples.append(first)
+            second=obj.sample();self.assertEqual(run.call_count,1)
+            self.assertEqual(second['tcp_observation'],'not_sampled_lean_mode');self.assertNotIn('tcp_sockets',second)
+            self.assertEqual(second['tun_kernel']['tx_dropped'],0);self.assertEqual(second['checker_reaped_children_cpu_seconds'],dict(user=1.0,system=.5))
+
     def test_diagnostic_sampling_is_read_only_fixed_argv(self):
         from types import SimpleNamespace
         obj=S.QueueDiagnostics.__new__(S.QueueDiagnostics);obj.ss='/usr/bin/ss';obj.pid=123;obj.identity=(100,234);obj.iface='wft0'

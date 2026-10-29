@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import selectors
 import re
+import resource
 import shutil
 import subprocess
 import signal
@@ -110,7 +111,8 @@ def cpu_snapshot(identities):
 
 
 class QueueDiagnostics:
-    def __init__(self,pid,iface):
+    def __init__(self,pid,iface,lean=False):
+        self.lean=lean
         if not isinstance(pid,int) or pid<=0 or not re.fullmatch(r'[a-zA-Z0-9_-]{1,15}',iface):raise ValueError('Diagnostic identity invalid')
         self.service_pid=pid;self.pid=resolve_carrier_pid(pid);self.identity=process_identity(self.pid);self.iface=iface;self.ss=shutil.which('ss')
         if not self.ss:raise RuntimeError('ss is required for queue diagnostics')
@@ -126,9 +128,13 @@ class QueueDiagnostics:
         result=dict(monotonic=time.monotonic(),utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))
         try:
             if process_identity(self.pid)!=self.identity:raise RuntimeError('Carrier process identity changed')
-            p=subprocess.run([self.ss,'-Htinp','( sport = :42443 or dport = :42443 )'],capture_output=True,text=True,timeout=.5,check=True)
-            if len(p.stdout)>1048576:raise ValueError('Socket observation too large')
-            result['tcp_sockets']=parse_tcp_samples(p.stdout,self.pid)
+            if not getattr(self,'lean',False) or not self.samples:
+                p=subprocess.run([self.ss,'-Htinp','( sport = :42443 or dport = :42443 )'],capture_output=True,text=True,timeout=.5,check=True)
+                if len(p.stdout)>1048576:raise ValueError('Socket observation too large')
+                result['tcp_sockets']=parse_tcp_samples(p.stdout,self.pid)
+            else:result['tcp_observation']='not_sampled_lean_mode'
+            usage=resource.getrusage(resource.RUSAGE_CHILDREN)
+            result['checker_reaped_children_cpu_seconds']=dict(user=usage.ru_utime,system=usage.ru_stime)
             kernel={}
             for key in ('rx_packets','tx_packets','rx_dropped','tx_dropped','rx_errors','tx_errors'):
                 kernel[key]=int((Path('/sys/class/net')/self.iface/'statistics'/key).read_text())
@@ -148,10 +154,12 @@ class QueueDiagnostics:
     def close(self):
         self.done.set()
         if self.thread:self.thread.join(2)
-        return dict(kind='carrier-owned-tcp-and-tun-v1',sample_interval_s=.5,max_samples=900,
+        return dict(kind='carrier-owned-tcp-and-tun-v1',tcp_sampling='preflight_only' if getattr(self,'lean',False) else 'every_sample',sample_interval_s=.5,max_samples=900,
                     service_pid=self.service_pid,socket_pid=self.pid,cpu_clock_ticks_per_second=getattr(self,'clock_ticks',None),samples=self.samples,observation_errors=self.errors,safety_stop_reason=self.safety_stop_reason,
                     sample_cap_reached=len(self.samples)>=900,
                     notes=['Service MainPID is the Python runner; socket PID is its unique dv-tunnel child verified by PPid, cgroup and kernel start ticks. Numeric ss fields only, established sockets on TCP port 42443.',
+                           'Lean mode verifies two owned TCP sockets at preflight only; subsequent CPU/TUN polling stays half-second. No interim TCP queue/retransmission evidence in lean mode.',
+                           'Child CPU counters cover reaped checker subprocesses collectively, not production services; active not-yet-reaped child work is absent until reaped.',
                            'FD identifies a local socket only; not a proven UDP/TCP lane mapping. FD can be reused after reconnect.',
                            'Socket counters are cumulative: compare same socket over time, not endpoint totals.',
                            'Half-second polling can miss short stalls; no causal WAN or loss attribution from a correlation alone.',
@@ -378,7 +386,7 @@ def run_phase(h,args,spec,stop,ports,progress=None):
 
 
 def run(args,live=None,helper=None,phases=None,ports=None):
-    os.umask(0o077);diagnostic=getattr(args,'queue_diagnostic',False);report=dict(suite='dv-queue-diagnostic-v1' if diagnostic else 'dv-soak-v2',role=args.role,status='failed',started_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
+    os.umask(0o077);diagnostic=getattr(args,'queue_diagnostic',False);lean=getattr(args,'lean_observer',False);report=dict(suite=('dv-queue-diagnostic-lean-v1' if lean else 'dv-queue-diagnostic-v1') if diagnostic else 'dv-soak-v2',role=args.role,status='failed',started_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
         notes=['Only existing test link; no carrier/service/config/firewall/routes changed.',
                'Four TCP workers, aggregate 2 Mbps payload pacer at each endpoint, overlap both initiating UDP directions.',
                'UDP echo return adds load; requested payload rate is per initiating sender, not total wire traffic.',
@@ -402,7 +410,8 @@ def run(args,live=None,helper=None,phases=None,ports=None):
         if expected_wait is not None and (not 0<=expected_wait<=200 or report['before']['stats'].get('lanes',{}).get('udp',{}).get('queue_wait_ms')!=expected_wait):raise RuntimeError('Local UDP wait does not match experiment')
         baseline=getattr(args,'cpu_baseline_seconds',0)
         if not 0<=baseline<=30 or (baseline and not diagnostic):raise ValueError('CPU baseline needs queue diagnostic and 0..30 seconds')
-        if diagnostic:observer=QueueDiagnostics(report['before']['main_pid'],args.iface)
+        if lean and not diagnostic:raise ValueError('Lean observer requires queue diagnostic')
+        if diagnostic:observer=QueueDiagnostics(report['before']['main_pid'],args.iface,lean=True) if lean else QueueDiagnostics(report['before']['main_pid'],args.iface)
         guard=h.HostGuard();monitor=Monitor(live,args,guard.stop)
         if observer:observer.load_stop=guard.stop
         if baseline:
@@ -487,6 +496,7 @@ def run(args,live=None,helper=None,phases=None,ports=None):
 def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('role',choices=['server','client'])
     ap.add_argument('--queue-diagnostic',action='store_true',help='One 30s 4.8Mbps phase with read-only carrier-owned TCP and TUN counters; no tuning or carrier changes');ap.add_argument('--expect-version');ap.add_argument('--expect-lane-packets',type=int);ap.add_argument('--expect-udp-wait-ms',type=int);ap.add_argument('--instance',default='main');ap.add_argument('--iface',default='wft0')
+    ap.add_argument('--lean-observer',action='store_true',help='Queue diagnostic only: verify sockets once, keep CPU/TUN and safety polling; no periodic ss process scans')
     ap.add_argument('--cpu-baseline-seconds',type=int,default=0,help='0..30 seconds without test load before services; queue diagnostic only; safety guards unchanged')
     ap.add_argument('--local');ap.add_argument('--peer');ap.add_argument('--output')
     args=ap.parse_args();args.output=args.output or ('/root/dv-queue-diag-results' if args.queue_diagnostic else '/root/dv-soak-results');args.local=args.local or ('10.254.253.2' if args.role=='server' else '10.254.253.1');args.peer=args.peer or ('10.254.253.1' if args.role=='server' else '10.254.253.2')
