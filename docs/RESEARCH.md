@@ -80,3 +80,15 @@ Input archive SHA256:
 
 Next opt-in experiment: SPLIT-UDP.md. TCP-only static reference review:
 TCP-REVIEW.md. No remote change or automatic profile migration was performed.
+
+## First preview.3 split-profile field checkpoint
+
+Operator run: 4/4 TCP payload checks and 4000/4000 unique UDP returns across the two initiating directions; 0 missing by drain. Queue drop/expiry delta 0 across both lanes/endpoints, session delta 0. Both carrier PIDs unchanged, both lanes connected, own test socket cleanup OK.
+
+Iran source-allowlist rejection counter increased by one, Turkey by zero; this is not a valid-probe loss or evidence of an attack. No capture identifies the rejected source. Historical startup drops were unchanged. This single short run is NOT a randomized causal proof versus the earlier failure, sustained stability, forwarded-client acceptance or capacity evidence.
+
+Report JSON hashes:
+- iran: 7aa1672728574bcd1c2aab8a9b0b74cb4d710893733a3bfb4d820cb8edf50ada
+- turkey: 2af4f6df9d5441ef5c8531a677dab418fada29b4c32ec0c560ee0c557317788f
+
+Next gate: SOAK-CHECK.md; existing runtime remains unchanged.
