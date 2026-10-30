@@ -15,6 +15,9 @@
 - The explicit Ubuntu installer/menu manages only DV-owned paths and services.
   No background upgrade daemon, public metrics, remote administration or automatic
   production integration is included. Read UPDATE.md for root/update trust limits.
+- The managed runner reads each instance JSON through a single no-follow file
+  descriptor. It requires a root-owned regular file with no group/world access;
+  nonblocking open and type validation reject FIFOs without waiting for a writer.
 - Never publish generated configurations, private keys or tokens. Acceptance
   archives contain only whitelisted test measurements, not carrier logs/configs.
 - Test traffic shares production resources unless the operator isolates servers.

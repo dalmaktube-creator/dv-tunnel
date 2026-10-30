@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,19 @@ import time
 SPLIT_UDP_SUPPORT = 1
 QUEUE_OVERRIDE_SUPPORT = 1
 UDP_WAIT_SUPPORT = 1
+
+def read_private_json(path, error_type):
+    """Validate and read one root-private regular file through the same fd."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+            raise error_type('Instance files must be root-private regular files, not symlinks')
+        with os.fdopen(fd, 'r', encoding='utf-8', closefd=False) as stream:
+            return json.load(stream)
+    finally:
+        os.close(fd)
+
 
 def main():
     here=Path(__file__).resolve().parent
@@ -27,10 +41,8 @@ def main():
     name=manager.instance_name(sys.argv[1])
     config_path=manager.ETC/name/'config.json'
     link_path=manager.ETC/name/'link.json'
-    for p in (config_path,link_path):
-        if p.is_symlink() or p.stat().st_uid!=0 or p.stat().st_mode & 0o077:
-            raise manager.SafeError('Instance files must be root-owned 0600, not symlinks')
-    cfg=json.loads(config_path.read_text());link=json.loads(link_path.read_text())
+    cfg=read_private_json(config_path, manager.SafeError)
+    link=read_private_json(link_path, manager.SafeError)
     addr=ipaddress.ip_interface(link['local']);peer=ipaddress.ip_address(link['peer'])
     if link.get('schema')!=1 or addr.version!=4 or addr.network.prefixlen!=30 or peer not in addr.network or addr.ip not in list(addr.network.hosts()) or peer not in list(addr.network.hosts()) or addr.ip==peer:
         raise manager.SafeError('Invalid local link metadata')
