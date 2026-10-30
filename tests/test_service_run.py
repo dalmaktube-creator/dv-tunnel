@@ -109,3 +109,83 @@ class PrivateConfigTests(unittest.TestCase):
 
     def test_closes_descriptor_after_invalid_json(self):
         self.assert_descriptor_closed(True)
+
+    def test_accepts_exact_byte_limit(self):
+        limit = 64 * 1024
+        self.path.write_bytes(b'{}' + b' ' * (limit - 2))
+        self.assertEqual(self.read(), {})
+
+    def test_rejects_oversized_json(self):
+        self.path.write_bytes(b'{}' + b' ' * (64 * 1024 - 1))
+        with self.assertRaises(PrivateConfigError): self.read()
+
+    def test_rejects_nonobject_json(self):
+        for value in ([], 'private-value', 123, None, True):
+            with self.subTest(value_type=type(value).__name__):
+                self.path.write_text(json.dumps(value), encoding='utf-8')
+                with self.assertRaises(PrivateConfigError): self.read()
+
+    def test_rejects_invalid_utf8(self):
+        self.path.write_bytes(b'{"v":"\xff"}')
+        with self.assertRaises(UnicodeDecodeError): self.read()
+
+    def test_read_stays_bounded_if_file_grows_after_validation(self):
+        real_fdopen = S.os.fdopen
+        def grow_before_read(*args, **kwargs):
+            self.path.write_bytes(b'{}' + b' ' * (64 * 1024))
+            return real_fdopen(*args, **kwargs)
+        with patch.object(S.os, 'fdopen', side_effect=grow_before_read):
+            with self.assertRaises(PrivateConfigError): self.read()
+
+    def test_closes_descriptor_after_permission_failure(self):
+        opened = []
+        self.path.chmod(0o640)
+        def capture_open(path, flags):
+            fd = self.real_open(path, flags);opened.append(fd);return fd
+        with patch.object(S.os, 'open', side_effect=capture_open):
+            with self.assertRaises(PrivateConfigError): self.read()
+        self.assertEqual(len(opened), 1)
+        with self.assertRaises(OSError) as caught: self.real_fstat(opened[0])
+        self.assertEqual(caught.exception.errno, errno.EBADF)
+
+    def test_repeated_reads_under_low_descriptor_limit(self):
+        import resource
+        old_soft, old_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        soft = 64 if old_soft == resource.RLIM_INFINITY else min(64, old_soft)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, old_hard))
+        try:
+            self.path.write_text('invalid JSON', encoding='utf-8')
+            for _ in range(256):
+                with self.assertRaises(json.JSONDecodeError): self.read()
+            self.path.write_text('{}', encoding='utf-8')
+            for _ in range(256): self.assertEqual(self.read(), {})
+        finally:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (old_soft, old_hard))
+
+    def test_repeated_path_replacements_keep_opened_inode(self):
+        for _ in range(128):
+            self.path.write_text('{"v":"original"}', encoding='utf-8')
+            replacement = self.root / 'replacement.json'
+            replacement.write_text('{"v":"replacement"}', encoding='utf-8')
+            replacement.chmod(0o600)
+            def swap(path, flags):
+                fd = self.real_open(path, flags)
+                replacement.replace(path)
+                return fd
+            with patch.object(S.os, 'open', side_effect=swap):
+                self.assertEqual(self.read(), {'v': 'original'})
+
+    def test_validation_errors_do_not_echo_private_payload(self):
+        private = 'DO-NOT-LOG-THIS-FIXTURE'
+        for data in (json.dumps([private]).encode(), json.dumps({'v': private * 4000}).encode()):
+            with self.subTest(size=len(data)):
+                self.path.write_bytes(data)
+                with self.assertRaises(PrivateConfigError) as caught: self.read()
+                self.assertNotIn(private, str(caught.exception))
+
+    def test_size_limit_is_bytes_not_unicode_characters(self):
+        data = json.dumps({'v': 'ا' * (32 * 1024)}, ensure_ascii=False)
+        self.assertLess(len(data), 64 * 1024)
+        self.assertGreater(len(data.encode('utf-8')), 64 * 1024)
+        self.path.write_text(data, encoding='utf-8')
+        with self.assertRaises(PrivateConfigError): self.read()

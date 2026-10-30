@@ -17,6 +17,7 @@ import time
 SPLIT_UDP_SUPPORT = 1
 QUEUE_OVERRIDE_SUPPORT = 1
 UDP_WAIT_SUPPORT = 1
+MAX_PRIVATE_JSON_BYTES = 64 * 1024
 
 def read_private_json(path, error_type):
     """Validate and read one root-private regular file through the same fd."""
@@ -25,8 +26,14 @@ def read_private_json(path, error_type):
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
             raise error_type('Instance files must be root-private regular files, not symlinks')
-        with os.fdopen(fd, 'r', encoding='utf-8', closefd=False) as stream:
-            return json.load(stream)
+        with os.fdopen(fd, 'rb', closefd=False) as stream:
+            payload = stream.read(MAX_PRIVATE_JSON_BYTES + 1)
+        if len(payload) > MAX_PRIVATE_JSON_BYTES:
+            raise error_type('Instance JSON exceeds the 64 KiB byte limit')
+        value = json.loads(payload.decode('utf-8'))
+        if not isinstance(value, dict):
+            raise error_type('Instance JSON must contain an object')
+        return value
     finally:
         os.close(fd)
 
