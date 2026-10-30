@@ -1,0 +1,893 @@
+{
+  "checkpoint": "sofia-resilience-active-flow",
+  "release": "v0.1.0-preview.6",
+  "binary_sha256": "b7b5f02da2227ec6bdd2a1ba2698f44d6c8ba5afa65908d1109358683dad9062",
+  "runtime_harness_sha256": {
+    "functional_check.py": "adc8c58d166b4bb9e98ea74ff5ef03f1b7005c0f120607b929c731476767e693",
+    "robust.py": "f55877d00fc5f67c63cfab1f11348ee2724116eb62e9db63041273e2e063249e"
+  },
+  "active_harness_sha256": "1220ada6290f560b0bf98e3c090b9331d9089b0296a4da30095f7c5f9a82680b",
+  "headline": {
+    "passed": 13,
+    "cases": 13,
+    "groups": 2,
+    "soak_tcp_bytes": 100663296,
+    "soak_udp_sent": 7500,
+    "soak_udp_received": 7500,
+    "datagram_size_replies": 400,
+    "old_stream_preserved_on_client_restart": true
+  },
+  "sources": [
+    {
+      "file": "resilience-client-result.json",
+      "sha256": "4953f38e8c1e040a5030dce3f30a3f17ba344dd3d21424ad1371dd200138e82d"
+    },
+    {
+      "file": "active-client-result.json",
+      "sha256": "4f31b1be7acf7e19ac1163457bfe47c578cf666d5a30b115e0c93748d3fd16a5"
+    }
+  ],
+  "comparison_plan": [
+    {
+      "question": "Can bounded recovery/concurrency gates pass under original Sofia default quotas?",
+      "grain": "group x functional gate",
+      "population": "11 recovery/boundary gates plus2 established-flow gates",
+      "unit": "pass/fail, exact fixture hashes and counts",
+      "delivery": "table",
+      "reason": "heterogeneous acceptance conditions, not a throughput or CPU ranking"
+    }
+  ],
+  "method": {
+    "peers": "Iran dialer; Sofia mother-local listener",
+    "quotas": "Iran1.5/1.35CPU and384/256MiB; Sofia0.5/0.4CPU and192/128MiB account/capsule, unchanged",
+    "caps": "64aggregate packets,32per split lane,262144aggregate bytes; lowat131072; offload-lowlat --split-udp",
+    "faults": "only own capsule carrier subprocesses; explicit stop/start or SIGSTOP3s/SIGCONT; not WAN outage or host-service restart",
+    "counter_caveat": "carrier counters reset on restart; final snapshots are only last process epochs, not whole-batch totals",
+    "not_tested": [
+      "hours/days soak",
+      "actual WAN loss/jitter/reordering",
+      "maximum unpaced throughput",
+      "thousands of users",
+      "production VPN/panel integration",
+      "whole-host CPU efficiency"
+    ]
+  },
+  "completion": [
+    {
+      "group": "resilience",
+      "role": "client",
+      "exit_code": 0,
+      "owned_carrier_stopped": true,
+      "owned_tun_absent": true,
+      "owned_processes": 6
+    },
+    {
+      "group": "resilience",
+      "role": "server",
+      "exit_code": 0,
+      "owned_carrier_stopped": true,
+      "owned_tun_absent": true,
+      "owned_processes": 2
+    },
+    {
+      "group": "active",
+      "role": "client",
+      "exit_code": 0,
+      "owned_carrier_stopped": true,
+      "owned_tun_absent": true,
+      "owned_processes": 2
+    },
+    {
+      "group": "active",
+      "role": "server",
+      "exit_code": 0,
+      "owned_carrier_stopped": true,
+      "owned_tun_absent": true,
+      "owned_processes": 1
+    }
+  ],
+  "groups": [
+    {
+      "group": "resilience",
+      "result": {
+        "release": "v0.1.0-preview.6",
+        "binary_sha256": "b7b5f02da2227ec6bdd2a1ba2698f44d6c8ba5afa65908d1109358683dad9062",
+        "queue_packets": 64,
+        "scope": "bounded owned-capsule restart/stall/auth/datagram/concurrency/mixed run; not WAN fault injection or production soak",
+        "cases": [
+          {
+            "name": "client-carrier-restart",
+            "pass": true,
+            "seconds": 2.3585009219823405,
+            "application": {
+              "recovery_seconds": 1.4262812120141461,
+              "failed_probes": 1,
+              "verified_http": 1,
+              "post_recovery_http": 3
+            }
+          },
+          {
+            "name": "server-carrier-restart",
+            "pass": true,
+            "seconds": 4.178891915944405,
+            "application": {
+              "recovery_seconds": 2.6307804259704426,
+              "failed_probes": 2,
+              "verified_http": 1,
+              "injection": "owned carrier restart",
+              "post_recovery_http": 3
+            }
+          },
+          {
+            "name": "server-three-second-stall",
+            "pass": true,
+            "seconds": 4.518216082942672,
+            "application": {
+              "recovery_seconds": 2.967181090032682,
+              "failed_probes": 2,
+              "verified_http": 1,
+              "injection": "owned carrier pause",
+              "post_recovery_http": 3
+            }
+          },
+          {
+            "name": "wrong-token-rejected",
+            "pass": true,
+            "seconds": 5.974093444063328,
+            "application": {
+              "field": "token",
+              "unauthorized_http_success": 0,
+              "rejected_probes": 6,
+              "carrier_alive_during_negative_test": true,
+              "valid_recovery": {
+                "recovery_seconds": 1.4354000909952447,
+                "failed_probes": 1,
+                "verified_http": 1
+              },
+              "integrity_ok": true
+            }
+          },
+          {
+            "name": "wrong-hostname-rejected",
+            "pass": true,
+            "seconds": 6.001864871941507,
+            "application": {
+              "field": "server_name",
+              "unauthorized_http_success": 0,
+              "rejected_probes": 6,
+              "carrier_alive_during_negative_test": true,
+              "valid_recovery": {
+                "recovery_seconds": 1.4465559530071914,
+                "failed_probes": 1,
+                "verified_http": 1
+              },
+              "integrity_ok": true
+            }
+          },
+          {
+            "name": "udp-datagram-sizes",
+            "pass": true,
+            "seconds": 44.032076418050565,
+            "application": {
+              "sizes": [
+                {
+                  "bytes": 64,
+                  "sent": 100,
+                  "unique_received": 100,
+                  "corrupt": 0,
+                  "duplicates": 0
+                },
+                {
+                  "bytes": 512,
+                  "sent": 100,
+                  "unique_received": 100,
+                  "corrupt": 0,
+                  "duplicates": 0
+                },
+                {
+                  "bytes": 1000,
+                  "sent": 100,
+                  "unique_received": 100,
+                  "corrupt": 0,
+                  "duplicates": 0
+                },
+                {
+                  "bytes": 1308,
+                  "sent": 100,
+                  "unique_received": 100,
+                  "corrupt": 0,
+                  "duplicates": 0
+                }
+              ],
+              "integrity_ok": true
+            }
+          },
+          {
+            "name": "http-100-connection-churn",
+            "pass": true,
+            "seconds": 25.52745102404151,
+            "application": {
+              "verified_http": 100,
+              "integrity_ok": true
+            }
+          },
+          {
+            "name": "tcp-16-parallel-streams",
+            "pass": true,
+            "seconds": 8.247737711993977,
+            "application": {
+              "streams": 16,
+              "per_stream": [
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.169457838987,
+                  "receiver_mbps": 0.5134127726302199
+                },
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.169230496976525,
+                  "receiver_mbps": 0.5134270604253771
+                },
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.167837455053814,
+                  "receiver_mbps": 0.513514626494531
+                },
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.148337921011262,
+                  "receiver_mbps": 0.5147435023754464
+                },
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.155320323072374,
+                  "receiver_mbps": 0.5143027905518087
+                },
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.170049730921164,
+                  "receiver_mbps": 0.5133755776449964
+                },
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.178772298037075,
+                  "receiver_mbps": 0.5128280684628723
+                },
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.155929766013287,
+                  "receiver_mbps": 0.514264359837692
+                },
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.160378194996156,
+                  "receiver_mbps": 0.5139840213008627
+                },
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.1554902800126,
+                  "receiver_mbps": 0.5142920727009339
+                },
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.165469391969964,
+                  "receiver_mbps": 0.5136635505761294
+                },
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.166144553921185,
+                  "receiver_mbps": 0.5136210818097748
+                },
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.183956520049833,
+                  "receiver_mbps": 0.5125032115853007
+                },
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.165184959070757,
+                  "receiver_mbps": 0.5136814439629467
+                },
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.168948458973318,
+                  "receiver_mbps": 0.5134447868125177
+                },
+                {
+                  "received": 524288,
+                  "sha256": "33bc8aab40703678c3ebe94d2dd8f2afff285dd901f9234e841e4679f8204fd5",
+                  "integrity_ok": true,
+                  "receiver_seconds": 8.170347595005296,
+                  "receiver_mbps": 0.5133568616547067
+                }
+              ],
+              "received": 8388608,
+              "integrity_ok": true
+            }
+          },
+          {
+            "name": "tcp-full-duplex",
+            "pass": true,
+            "seconds": 17.12170464999508,
+            "application": {
+              "upload": {
+                "received": 8388608,
+                "sha256": "7d212b9c884f5c77896de960ae17cc341cda43b14d6a971f34ca29ebd4badf7f",
+                "receiver_seconds": 16.828575433930382,
+                "receiver_mbps": 3.9877923276079974,
+                "integrity_ok": true
+              },
+              "download": {
+                "received": 8388608,
+                "sha256": "7d212b9c884f5c77896de960ae17cc341cda43b14d6a971f34ca29ebd4badf7f",
+                "integrity_ok": true,
+                "receiver_seconds": 17.02289743896108,
+                "receiver_mbps": 3.9422703591225834
+              },
+              "integrity_ok": true
+            }
+          },
+          {
+            "name": "idle-resume",
+            "pass": true,
+            "seconds": 5.737262152018957,
+            "application": {
+              "idle_seconds": 5,
+              "verified_http": 3
+            }
+          },
+          {
+            "name": "sustained-mixed-three-cycles",
+            "pass": true,
+            "seconds": 101.9981006240705,
+            "application": {
+              "cycles": [
+                {
+                  "tcp": {
+                    "received": 33554432,
+                    "sha256": "e09320c5b00b34bb704802136c599a95b3996332ba84d7c7f21112b6231b6bd0",
+                    "integrity_ok": true,
+                    "receiver_seconds": 33.7990466899937,
+                    "receiver_mbps": 7.942101398956647
+                  },
+                  "udp": {
+                    "sent": 2500,
+                    "received": 2500,
+                    "lost": 0,
+                    "duplicates": 0,
+                    "corrupt": 0,
+                    "reordered": 0,
+                    "offered_mbps": 1.0,
+                    "payload_bytes": 1000,
+                    "seconds": 20.302101036999375,
+                    "rtt_ms": {
+                      "samples": 2500,
+                      "p50": 109.273103,
+                      "p95": 139.880161,
+                      "p99": 269.559475,
+                      "max": 327.470534
+                    },
+                    "integrity_ok": true
+                  },
+                  "integrity_ok": true
+                },
+                {
+                  "tcp": {
+                    "received": 33554432,
+                    "sha256": "e09320c5b00b34bb704802136c599a95b3996332ba84d7c7f21112b6231b6bd0",
+                    "integrity_ok": true,
+                    "receiver_seconds": 33.80295489099808,
+                    "receiver_mbps": 7.9411831558987735
+                  },
+                  "udp": {
+                    "sent": 2500,
+                    "received": 2500,
+                    "lost": 0,
+                    "duplicates": 0,
+                    "corrupt": 0,
+                    "reordered": 0,
+                    "offered_mbps": 1.0,
+                    "payload_bytes": 1000,
+                    "seconds": 20.30305600806605,
+                    "rtt_ms": {
+                      "samples": 2500,
+                      "p50": 109.14554,
+                      "p95": 153.388383,
+                      "p99": 277.983963,
+                      "max": 352.416145
+                    },
+                    "integrity_ok": true
+                  },
+                  "integrity_ok": true
+                },
+                {
+                  "tcp": {
+                    "received": 33554432,
+                    "sha256": "e09320c5b00b34bb704802136c599a95b3996332ba84d7c7f21112b6231b6bd0",
+                    "integrity_ok": true,
+                    "receiver_seconds": 33.80075093405321,
+                    "receiver_mbps": 7.941700955808043
+                  },
+                  "udp": {
+                    "sent": 2500,
+                    "received": 2500,
+                    "lost": 0,
+                    "duplicates": 0,
+                    "corrupt": 0,
+                    "reordered": 0,
+                    "offered_mbps": 1.0,
+                    "payload_bytes": 1000,
+                    "seconds": 20.302610440994613,
+                    "rtt_ms": {
+                      "samples": 2500,
+                      "p50": 109.179089,
+                      "p95": 117.775207,
+                      "p99": 269.326221,
+                      "max": 346.241155
+                    },
+                    "integrity_ok": true
+                  },
+                  "integrity_ok": true
+                }
+              ],
+              "integrity_ok": true
+            }
+          }
+        ],
+        "client_final_stats": {
+          "connected": 1,
+          "drop_reasons": {
+            "cancelled_session": 0,
+            "flow_limit": 0,
+            "invalid_size": 0,
+            "invalid_vnet_metadata": 0,
+            "no_session_or_oversize": 2,
+            "queue_bytes": 0,
+            "queue_expired": 0,
+            "queue_packets": 164,
+            "tun_write": 0,
+            "unknown_flow": 0,
+            "unsupported_offload": 0
+          },
+          "drops": 166,
+          "flows": 0,
+          "padding_bytes": 0,
+          "rx_datagrams": 37210,
+          "sessions": 2,
+          "spoofed_drops": 3,
+          "tx_datagrams": 33702,
+          "version": "v0.1.0-preview.6",
+          "ws_messages": 29590,
+          "snapshot_age_seconds": 0.7048778533935547,
+          "lanes": {
+            "tcp": {
+              "byte_limit": 131072,
+              "connected": true,
+              "drop_reasons": {
+                "cancelled_session": 0,
+                "flow_limit": 0,
+                "invalid_size": 0,
+                "invalid_vnet_metadata": 0,
+                "no_session_or_oversize": 0,
+                "queue_bytes": 0,
+                "queue_expired": 0,
+                "queue_packets": 164,
+                "tun_write": 0,
+                "unknown_flow": 0,
+                "unsupported_offload": 0
+              },
+              "max_write_us": 4886,
+              "packet_limit": 32,
+              "queue_retry_success": 0,
+              "queue_wait_max_us": 0,
+              "queue_wait_ms": 0,
+              "queue_wait_success": 0,
+              "queue_wait_timeouts": 0,
+              "queue_waits": 0,
+              "queue_yields": 0,
+              "queued_bytes": 0,
+              "queued_packets": 0,
+              "rx_datagrams": 29307,
+              "tx_datagrams": 25797,
+              "writes_over_100ms": 0
+            },
+            "udp": {
+              "byte_limit": 131072,
+              "connected": true,
+              "drop_reasons": {
+                "cancelled_session": 0,
+                "flow_limit": 0,
+                "invalid_size": 0,
+                "invalid_vnet_metadata": 0,
+                "no_session_or_oversize": 0,
+                "queue_bytes": 0,
+                "queue_expired": 0,
+                "queue_packets": 0,
+                "tun_write": 0,
+                "unknown_flow": 0,
+                "unsupported_offload": 0
+              },
+              "max_write_us": 2075,
+              "packet_limit": 32,
+              "queue_retry_success": 0,
+              "queue_wait_max_us": 0,
+              "queue_wait_ms": 0,
+              "queue_wait_success": 0,
+              "queue_wait_timeouts": 0,
+              "queue_waits": 0,
+              "queue_yields": 0,
+              "queued_bytes": 0,
+              "queued_packets": 0,
+              "rx_datagrams": 7903,
+              "tx_datagrams": 7905,
+              "writes_over_100ms": 0
+            }
+          }
+        },
+        "server_final": {
+          "stats": {
+            "connected": 1,
+            "drop_reasons": {
+              "cancelled_session": 0,
+              "flow_limit": 0,
+              "invalid_size": 0,
+              "invalid_vnet_metadata": 0,
+              "no_session_or_oversize": 6,
+              "queue_bytes": 0,
+              "queue_expired": 0,
+              "queue_packets": 19,
+              "tun_write": 0,
+              "unknown_flow": 0,
+              "unsupported_offload": 0
+            },
+            "drops": 25,
+            "flows": 0,
+            "padding_bytes": 0,
+            "rx_datagrams": 33763,
+            "sessions": 6,
+            "spoofed_drops": 5,
+            "tx_datagrams": 37265,
+            "version": "v0.1.0-preview.6",
+            "ws_messages": 34860,
+            "snapshot_age_seconds": 0.9591243267059326,
+            "lanes": {
+              "tcp": {
+                "byte_limit": 131072,
+                "connected": true,
+                "drop_reasons": {
+                  "cancelled_session": 0,
+                  "flow_limit": 0,
+                  "invalid_size": 0,
+                  "invalid_vnet_metadata": 0,
+                  "no_session_or_oversize": 0,
+                  "queue_bytes": 0,
+                  "queue_expired": 0,
+                  "queue_packets": 19,
+                  "tun_write": 0,
+                  "unknown_flow": 0,
+                  "unsupported_offload": 0
+                },
+                "max_write_us": 62927,
+                "packet_limit": 32,
+                "queue_retry_success": 0,
+                "queue_wait_max_us": 0,
+                "queue_wait_ms": 0,
+                "queue_wait_success": 0,
+                "queue_wait_timeouts": 0,
+                "queue_waits": 0,
+                "queue_yields": 0,
+                "queued_bytes": 0,
+                "queued_packets": 0,
+                "rx_datagrams": 25858,
+                "tx_datagrams": 29361,
+                "writes_over_100ms": 0
+              },
+              "udp": {
+                "byte_limit": 131072,
+                "connected": true,
+                "drop_reasons": {
+                  "cancelled_session": 0,
+                  "flow_limit": 0,
+                  "invalid_size": 0,
+                  "invalid_vnet_metadata": 0,
+                  "no_session_or_oversize": 0,
+                  "queue_bytes": 0,
+                  "queue_expired": 0,
+                  "queue_packets": 0,
+                  "tun_write": 0,
+                  "unknown_flow": 0,
+                  "unsupported_offload": 0
+                },
+                "max_write_us": 6796,
+                "packet_limit": 32,
+                "queue_retry_success": 0,
+                "queue_wait_max_us": 0,
+                "queue_wait_ms": 0,
+                "queue_wait_success": 0,
+                "queue_wait_timeouts": 0,
+                "queue_waits": 0,
+                "queue_yields": 0,
+                "queued_bytes": 0,
+                "queued_packets": 0,
+                "rx_datagrams": 7905,
+                "tx_datagrams": 7904,
+                "writes_over_100ms": 0
+              }
+            }
+          },
+          "phases": []
+        }
+      }
+    },
+    {
+      "group": "active",
+      "result": {
+        "release": "v0.1.0-preview.6",
+        "binary_sha256": "b7b5f02da2227ec6bdd2a1ba2698f44d6c8ba5afa65908d1109358683dad9062",
+        "queue_packets": 64,
+        "scope": "owned carrier restart/stall, not physical WAN outage; retained-stream preservation reported separately from fresh-transfer recovery",
+        "cases": [
+          {
+            "name": "established-tcp-server-stall",
+            "pass": true,
+            "seconds": 17.005279023083858,
+            "application": {
+              "injection": "server owned carrier SIGSTOP3s/SIGCONT during same established TCP download",
+              "tcp": {
+                "received": 8388608,
+                "sha256": "7d212b9c884f5c77896de960ae17cc341cda43b14d6a971f34ca29ebd4badf7f",
+                "integrity_ok": true,
+                "receiver_seconds": 16.933592077111825,
+                "receiver_mbps": 3.963061333614339
+              },
+              "integrity_ok": true
+            }
+          },
+          {
+            "name": "established-tcp-client-restart-and-fresh-transfer",
+            "pass": true,
+            "seconds": 25.498649877961725,
+            "application": {
+              "injection": "client owned carrier stop/start during established download",
+              "old_stream_preserved": true,
+              "old_stream": {
+                "received": 8388608,
+                "sha256": "7d212b9c884f5c77896de960ae17cc341cda43b14d6a971f34ca29ebd4badf7f",
+                "integrity_ok": true,
+                "receiver_seconds": 16.947516852989793,
+                "receiver_mbps": 3.9598051196604063
+              },
+              "old_stream_error": null,
+              "recovery": {
+                "recovery_seconds": 1.4071422870038077,
+                "failed_probes": 1,
+                "verified_http": 1
+              },
+              "fresh_tcp": {
+                "received": 2097152,
+                "sha256": "91d3beb88a9b2f778a6c44a1c53b63d3c79931845a9aef84b3fb414610bd1938",
+                "integrity_ok": true,
+                "receiver_seconds": 8.484843559097499,
+                "receiver_mbps": 1.9773158907581
+              },
+              "integrity_ok": true
+            }
+          }
+        ],
+        "client_final_stats": {
+          "connected": 1,
+          "drop_reasons": {
+            "cancelled_session": 0,
+            "flow_limit": 0,
+            "invalid_size": 0,
+            "invalid_vnet_metadata": 0,
+            "no_session_or_oversize": 2,
+            "queue_bytes": 0,
+            "queue_expired": 0,
+            "queue_packets": 0,
+            "tun_write": 0,
+            "unknown_flow": 0,
+            "unsupported_offload": 0
+          },
+          "drops": 2,
+          "flows": 0,
+          "padding_bytes": 0,
+          "rx_datagrams": 2465,
+          "sessions": 2,
+          "spoofed_drops": 0,
+          "tx_datagrams": 2294,
+          "version": "v0.1.0-preview.6",
+          "ws_messages": 2211,
+          "snapshot_age_seconds": 1.102299690246582,
+          "lanes": {
+            "tcp": {
+              "byte_limit": 131072,
+              "connected": true,
+              "drop_reasons": {
+                "cancelled_session": 0,
+                "flow_limit": 0,
+                "invalid_size": 0,
+                "invalid_vnet_metadata": 0,
+                "no_session_or_oversize": 0,
+                "queue_bytes": 0,
+                "queue_expired": 0,
+                "queue_packets": 0,
+                "tun_write": 0,
+                "unknown_flow": 0,
+                "unsupported_offload": 0
+              },
+              "max_write_us": 1170,
+              "packet_limit": 32,
+              "queue_retry_success": 0,
+              "queue_wait_max_us": 0,
+              "queue_wait_ms": 0,
+              "queue_wait_success": 0,
+              "queue_wait_timeouts": 0,
+              "queue_waits": 0,
+              "queue_yields": 0,
+              "queued_bytes": 0,
+              "queued_packets": 0,
+              "rx_datagrams": 2465,
+              "tx_datagrams": 2292,
+              "writes_over_100ms": 0
+            },
+            "udp": {
+              "byte_limit": 131072,
+              "connected": true,
+              "drop_reasons": {
+                "cancelled_session": 0,
+                "flow_limit": 0,
+                "invalid_size": 0,
+                "invalid_vnet_metadata": 0,
+                "no_session_or_oversize": 0,
+                "queue_bytes": 0,
+                "queue_expired": 0,
+                "queue_packets": 0,
+                "tun_write": 0,
+                "unknown_flow": 0,
+                "unsupported_offload": 0
+              },
+              "max_write_us": 64,
+              "packet_limit": 32,
+              "queue_retry_success": 0,
+              "queue_wait_max_us": 0,
+              "queue_wait_ms": 0,
+              "queue_wait_success": 0,
+              "queue_wait_timeouts": 0,
+              "queue_waits": 0,
+              "queue_yields": 0,
+              "queued_bytes": 0,
+              "queued_packets": 0,
+              "rx_datagrams": 0,
+              "tx_datagrams": 2,
+              "writes_over_100ms": 0
+            }
+          }
+        },
+        "server_final": {
+          "stats": {
+            "connected": 1,
+            "drop_reasons": {
+              "cancelled_session": 0,
+              "flow_limit": 0,
+              "invalid_size": 0,
+              "invalid_vnet_metadata": 0,
+              "no_session_or_oversize": 69,
+              "queue_bytes": 0,
+              "queue_expired": 0,
+              "queue_packets": 51,
+              "tun_write": 0,
+              "unknown_flow": 0,
+              "unsupported_offload": 0
+            },
+            "drops": 120,
+            "flows": 0,
+            "padding_bytes": 0,
+            "rx_datagrams": 3426,
+            "sessions": 4,
+            "spoofed_drops": 4,
+            "tx_datagrams": 3802,
+            "version": "v0.1.0-preview.6",
+            "ws_messages": 3733,
+            "snapshot_age_seconds": 0.46544790267944336,
+            "lanes": {
+              "tcp": {
+                "byte_limit": 131072,
+                "connected": true,
+                "drop_reasons": {
+                  "cancelled_session": 0,
+                  "flow_limit": 0,
+                  "invalid_size": 0,
+                  "invalid_vnet_metadata": 0,
+                  "no_session_or_oversize": 0,
+                  "queue_bytes": 0,
+                  "queue_expired": 0,
+                  "queue_packets": 51,
+                  "tun_write": 0,
+                  "unknown_flow": 0,
+                  "unsupported_offload": 0
+                },
+                "max_write_us": 5431,
+                "packet_limit": 32,
+                "queue_retry_success": 0,
+                "queue_wait_max_us": 0,
+                "queue_wait_ms": 0,
+                "queue_wait_success": 0,
+                "queue_wait_timeouts": 0,
+                "queue_waits": 0,
+                "queue_yields": 0,
+                "queued_bytes": 0,
+                "queued_packets": 0,
+                "rx_datagrams": 3422,
+                "tx_datagrams": 3800,
+                "writes_over_100ms": 0
+              },
+              "udp": {
+                "byte_limit": 131072,
+                "connected": true,
+                "drop_reasons": {
+                  "cancelled_session": 0,
+                  "flow_limit": 0,
+                  "invalid_size": 0,
+                  "invalid_vnet_metadata": 0,
+                  "no_session_or_oversize": 0,
+                  "queue_bytes": 0,
+                  "queue_expired": 0,
+                  "queue_packets": 0,
+                  "tun_write": 0,
+                  "unknown_flow": 0,
+                  "unsupported_offload": 0
+                },
+                "max_write_us": 160,
+                "packet_limit": 32,
+                "queue_retry_success": 0,
+                "queue_wait_max_us": 0,
+                "queue_wait_ms": 0,
+                "queue_wait_success": 0,
+                "queue_wait_timeouts": 0,
+                "queue_waits": 0,
+                "queue_yields": 0,
+                "queued_bytes": 0,
+                "queued_packets": 0,
+                "rx_datagrams": 4,
+                "tx_datagrams": 2,
+                "writes_over_100ms": 0
+              }
+            }
+          },
+          "phases": []
+        }
+      }
+    }
+  ]
+}
