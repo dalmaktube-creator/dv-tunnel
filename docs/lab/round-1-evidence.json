@@ -1,0 +1,107 @@
+{
+  "source": "DV Lab MCP live node jobs; release v0.1.0-preview.6, offload-lowlat + split-udp; stripped executable SHA256 b7b5f02da2227ec6bdd2a1ba2698f44d6c8ba5afa65908d1109358683dad9062",
+  "scope": "Iran dialer to Turkey listener, isolated rootless capsules; sequential 10-second trials; no baseline, no repetitions, no reverse/mixed/soak/app test",
+  "limits": {
+    "account_cpus": 0.5,
+    "capsule_cpus": 0.4,
+    "account_memory_mib": 192,
+    "capsule_memory_mib": 128
+  },
+  "rows": [
+    {
+      "phase": "one",
+      "start": 1793379686,
+      "end": 1793379696.000612,
+      "seconds": 10.000612,
+      "received_mbps": 44.39520702092516,
+      "retransmits": 17788,
+      "iran_lab_cpu_one_core_pct": 42.44975437785633,
+      "iran_lab_peak_memory_mib": 165.3671875,
+      "iran_lab_throttled_periods": 72,
+      "iran_capsule_cpu_one_core_pct": 24.699433997269605,
+      "iran_capsule_peak_memory_mib": 44.1640625,
+      "iran_capsule_throttled_periods": 20,
+      "iran_logical_cpus": 2,
+      "turkey_lab_cpu_one_core_pct": 19.050004007714943,
+      "turkey_lab_peak_memory_mib": 147.78515625,
+      "turkey_lab_throttled_periods": 2,
+      "turkey_capsule_cpu_one_core_pct": 10.608112683990463,
+      "turkey_capsule_peak_memory_mib": 49.2578125,
+      "turkey_capsule_throttled_periods": 0,
+      "turkey_logical_cpus": 1
+    },
+    {
+      "phase": "four",
+      "start": 1793379697,
+      "end": 1793379707.001255,
+      "seconds": 10.001255,
+      "received_mbps": 27.33413611349581,
+      "retransmits": 7197,
+      "iran_lab_cpu_one_core_pct": 48.59896823379617,
+      "iran_lab_peak_memory_mib": 172.7265625,
+      "iran_lab_throttled_periods": 88,
+      "iran_capsule_cpu_one_core_pct": 30.15177251939809,
+      "iran_capsule_peak_memory_mib": 49.0,
+      "iran_capsule_throttled_periods": 20,
+      "iran_logical_cpus": 2,
+      "turkey_lab_cpu_one_core_pct": 25.810359312724767,
+      "turkey_lab_peak_memory_mib": 148.19921875,
+      "turkey_lab_throttled_periods": 6,
+      "turkey_capsule_cpu_one_core_pct": 14.406864751465355,
+      "turkey_capsule_peak_memory_mib": 50.1640625,
+      "turkey_capsule_throttled_periods": 0,
+      "turkey_logical_cpus": 1
+    },
+    {
+      "phase": "udp",
+      "start": 1793379709,
+      "end": 1793379719.002861,
+      "seconds": 10.002861,
+      "received_mbps": 4.914153557018001,
+      "retransmits": null,
+      "iran_lab_cpu_one_core_pct": 38.77248559101801,
+      "iran_lab_peak_memory_mib": 151.9140625,
+      "iran_lab_throttled_periods": 22,
+      "iran_capsule_cpu_one_core_pct": 24.25037541436266,
+      "iran_capsule_peak_memory_mib": 35.4921875,
+      "iran_capsule_throttled_periods": 8,
+      "iran_logical_cpus": 2,
+      "turkey_lab_cpu_one_core_pct": 27.104036494955107,
+      "turkey_lab_peak_memory_mib": 164.984375,
+      "turkey_lab_throttled_periods": 16,
+      "turkey_capsule_cpu_one_core_pct": 13.581384683211015,
+      "turkey_capsule_peak_memory_mib": 50.47265625,
+      "turkey_capsule_throttled_periods": 9,
+      "turkey_logical_cpus": 1,
+      "iperf_reported_loss_pct": 0.144,
+      "sent_packets": 6250,
+      "received_packets": 6223,
+      "reported_lost_packets": 9,
+      "packet_counts_reconcile": false
+    }
+  ],
+  "validation": "Receiver throughput independently reconciled with received bytes/duration. CPU cumulative deltas interpolated at integer-second iperf start and precise phase duration; approx 1-second sampling, shared account includes agent/network/test tool, not standalone tunnel CPU. UDP packet counts do not reconcile; loss number is unverified.",
+  "comparison_plan": [
+    {
+      "question": "Does four-flow TCP improve aggregate delivered speed?",
+      "grain": "one 10s phase",
+      "measure": "receiver Mbps",
+      "decision": "chart",
+      "reason": "Two directly comparable TCP phases"
+    },
+    {
+      "question": "CPU cost at each achieved rate?",
+      "grain": "same phase per node",
+      "measure": "whole-lab CPU percent of one core",
+      "decision": "table",
+      "reason": "Exact supporting values; no standalone Go CPU claim"
+    },
+    {
+      "question": "Does UDP pass?",
+      "grain": "single 5Mbps offered UDP phase",
+      "decision": "prose",
+      "reason": "Only one rate and inconsistent loss counters; no gaming/quality claim"
+    }
+  ],
+  "tcp_four_vs_one_change_pct": -38.42998389305363
+}
